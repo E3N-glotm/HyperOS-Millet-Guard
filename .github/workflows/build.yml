@@ -1,0 +1,19 @@
+name: Build Magisk module
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: |
+          for f in module/*.sh module/bin/*; do sh -n "$f"; done
+      - name: Build
+        run: ./build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MilletGuard
+          path: dist/*.zip

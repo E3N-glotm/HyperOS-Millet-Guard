@@ -1,0 +1,43 @@
+#!/system/bin/sh
+MODDIR=${0%/*}
+RUNDIR=/data/adb/millet_guard
+LOG=$RUNDIR/module.log
+BB=/data/adb/magisk/busybox
+[ -x "$BB" ] || BB=/system/xbin/busybox
+[ -x "$BB" ] || BB=busybox
+mkdir -p "$RUNDIR"
+chmod 700 "$RUNDIR"
+log() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
+  lines=$(wc -l < "$LOG" 2>/dev/null || echo 0)
+  if [ "$lines" -gt 500 ] 2>/dev/null; then
+    tail -n 300 "$LOG" > "$LOG.tmp" && mv -f "$LOG.tmp" "$LOG"
+  fi
+}
+# Wait for SettingsProvider/system_server.
+i=0
+while [ "$(getprop sys.boot_completed)" != "1" ] && [ "$i" -lt 180 ]; do
+  sleep 2
+  i=$((i+1))
+done
+sleep 8
+"$MODDIR/bin/reconcile.sh" boot
+# Stop stale module-owned workers.
+for f in inotifyd.pid safety.pid; do
+  if [ -f "$RUNDIR/$f" ]; then
+    old=$(cat "$RUNDIR/$f" 2>/dev/null)
+    [ -n "$old" ] && kill "$old" 2>/dev/null || true
+  fi
+done
+# Primary path: event-driven SettingsProvider watcher.
+"$BB" inotifyd "$MODDIR/bin/inotify_handler.sh" /data/system/users/0:wymnD >/dev/null 2>&1 &
+echo $! > "$RUNDIR/inotifyd.pid"
+# Low-frequency fallback for missed events and runtime Xiaomi policy changes.
+(
+  while true; do
+    sleep 300
+    "$MODDIR/bin/reconcile.sh" safety
+  done
+) >/dev/null 2>&1 &
+echo $! > "$RUNDIR/safety.pid"
+log "started inotify=$(cat "$RUNDIR/inotifyd.pid") safety=$(cat "$RUNDIR/safety.pid")"
