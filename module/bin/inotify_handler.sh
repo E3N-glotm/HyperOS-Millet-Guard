@@ -6,6 +6,6 @@ sub=$3
 case "$sub" in
   settings_system.xml|settings_system.xml.fallback|settings_system.xml.*|"")
     sleep 1
-    "$MODDIR/bin/reconcile.sh" "inotify:$events:$sub"
+    /system/bin/sh "$MODDIR/bin/reconcile.sh" "inotify:$events:$sub"
     ;;
 esac

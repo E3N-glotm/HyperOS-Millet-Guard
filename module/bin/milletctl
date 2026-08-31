@@ -31,7 +31,7 @@ case "$cmd" in
     if ! normalize_file "$CONFIG" | grep -Fxq "$pkg"; then
       printf '%s\n' "$pkg" >> "$CONFIG"
     fi
-    "$MODDIR/bin/reconcile.sh" ctl-add
+    /system/bin/sh "$MODDIR/bin/reconcile.sh" ctl-add
     echo "Added: $pkg"
     ;;
   remove|rm|del)
@@ -41,7 +41,7 @@ case "$cmd" in
     tmp=$CONFIG.tmp.$$
     awk -v p="$pkg" '$0!=p' "$CONFIG" > "$tmp" && mv -f "$tmp" "$CONFIG"
     chmod 600 "$CONFIG"
-    "$MODDIR/bin/reconcile.sh" ctl-remove
+    /system/bin/sh "$MODDIR/bin/reconcile.sh" ctl-remove
     echo "Removed: $pkg"
     ;;
   status)
@@ -54,7 +54,7 @@ case "$cmd" in
     ;;
   apply)
     ensure_config
-    "$MODDIR/bin/reconcile.sh" ctl-apply
+    /system/bin/sh "$MODDIR/bin/reconcile.sh" ctl-apply
     echo 'Applied.'
     ;;
   config)

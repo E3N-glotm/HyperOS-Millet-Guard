@@ -18,6 +18,7 @@ Millet Guard does **not** disable Millet/Greeze globally. It maintains a narrow,
 - Ownership-aware state: removing an app from the config removes only the entry that Millet Guard previously owned.
 - Preserves unrelated entries created by the system, user, HyperCeiler, PowerKeeper, or other modules.
 - Special GMS handling: when `com.google.android.gms` is managed, the known Xiaomi GMS limiter is disabled on a best-effort basis.
+- Permission-safe helper execution: v2.0.1 explicitly invokes internal helpers through `/system/bin/sh` and repairs helper execute bits at service startup, so GMS reconciliation still works if a ZIP extractor installs scripts as `0644`.
 - No database fighting: PowerKeeper may still show `bgControl=miuiAuto`; the module works at the effective Millet/Greeze layer.
 - Clean uninstall semantics.
 
@@ -109,6 +110,10 @@ dumpsys greezer IM GMS disable
 ```
 
 The generic `MILLET_NO_RESTRICT_APP` mechanism remains the primary feature. This GMS command is best-effort and ROM-specific.
+
+### v2.0.1 reliability fix
+
+v2.0.1 fixes a failure mode where helper scripts could be extracted without executable bits. In that state the Xiaomi GMS command itself was valid, but the module's direct helper invocation could fail with `Permission denied` before reconciliation reached it. Installation now assigns explicit script modes, service startup self-heals the helper modes, and internal helper chaining uses `/system/bin/sh`.
 
 ## Battery impact
 

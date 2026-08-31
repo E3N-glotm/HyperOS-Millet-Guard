@@ -23,3 +23,11 @@ fi
 ui_print "- Millet Guard configuration: $CONFIG"
 ui_print "- Default managed package: com.google.android.gms"
 ui_print "- Edit packages.list or use bin/milletctl after installation"
+ui_print "- Setting Millet Guard script permissions"
+set_perm "$MODPATH/service.sh" 0 0 0755
+set_perm "$MODPATH/action.sh" 0 0 0755
+set_perm "$MODPATH/uninstall.sh" 0 0 0755
+set_perm "$MODPATH/bin/reconcile.sh" 0 0 0755
+set_perm "$MODPATH/bin/inotify_handler.sh" 0 0 0755
+set_perm "$MODPATH/bin/milletctl" 0 0 0755
+set_perm "$MODPATH/bin/lib.sh" 0 0 0644
