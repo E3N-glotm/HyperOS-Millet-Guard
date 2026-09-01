@@ -30,4 +30,5 @@ set_perm "$MODPATH/uninstall.sh" 0 0 0755
 set_perm "$MODPATH/bin/reconcile.sh" 0 0 0755
 set_perm "$MODPATH/bin/inotify_handler.sh" 0 0 0755
 set_perm "$MODPATH/bin/milletctl" 0 0 0755
+set_perm "$MODPATH/bin/fcm_guard.sh" 0 0 0755
 set_perm "$MODPATH/bin/lib.sh" 0 0 0644

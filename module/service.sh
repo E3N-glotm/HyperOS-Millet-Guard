@@ -7,7 +7,7 @@ BB=/data/adb/magisk/busybox
 [ -x "$BB" ] || BB=busybox
 mkdir -p "$RUNDIR"
 chmod 700 "$RUNDIR"
-chmod 0755 "$MODDIR/bin/inotify_handler.sh" "$MODDIR/bin/reconcile.sh" "$MODDIR/bin/milletctl" 2>/dev/null || true
+chmod 0755 "$MODDIR/bin/inotify_handler.sh" "$MODDIR/bin/reconcile.sh" "$MODDIR/bin/milletctl" "$MODDIR/bin/fcm_guard.sh" 2>/dev/null || true
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
   lines=$(wc -l < "$LOG" 2>/dev/null || echo 0)

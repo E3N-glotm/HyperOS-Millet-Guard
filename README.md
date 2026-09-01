@@ -18,6 +18,7 @@ Millet Guard does **not** disable Millet/Greeze globally. It maintains a narrow,
 - Ownership-aware state: removing an app from the config removes only the entry that Millet Guard previously owned.
 - Preserves unrelated entries created by the system, user, HyperCeiler, PowerKeeper, or other modules.
 - Special GMS handling: when `com.google.android.gms` is managed, the known Xiaomi GMS limiter is disabled on a best-effort basis.
+- Conservative FCM recovery guard for the tested sing-box/Box setup: it reads GMS's own `GcmService` connection state and only resets a stuck `com.google.android.gms.persistent` reconnect backoff after a confirmed 10-minute disconnect with working mtalk DNS.
 - Permission-safe helper execution: v2.0.1 explicitly invokes internal helpers through `/system/bin/sh` and repairs helper execute bits at service startup, so GMS reconciliation still works if a ZIP extractor installs scripts as `0644`.
 - No database fighting: PowerKeeper may still show `bgControl=miuiAuto`; the module works at the effective Millet/Greeze layer.
 - Clean uninstall semantics.
@@ -27,6 +28,8 @@ Millet Guard does **not** disable Millet/Greeze globally. It maintains a narrow,
 - Rooted Xiaomi/Redmi/POCO device running a compatible HyperOS/MIUI build.
 - Magisk-compatible module environment.
 - `settings`, `dumpsys`, and BusyBox `inotifyd` available.
+
+The optional FCM recovery guard is deliberately narrower than the core Millet feature. It activates only when `com.google.android.gms` is managed **and** a `sing-box` process is present. It does not install Box For Root, create proxy rules, or rewrite a user's sing-box configuration.
 
 The internal Xiaomi APIs used here are undocumented and can change between ROM versions. Test on your own device.
 
@@ -115,9 +118,21 @@ The generic `MILLET_NO_RESTRICT_APP` mechanism remains the primary feature. This
 
 v2.0.1 fixes a failure mode where helper scripts could be extracted without executable bits. In that state the Xiaomi GMS command itself was valid, but the module's direct helper invocation could fail with `Permission denied` before reconciliation reached it. Installation now assigns explicit script modes, service startup self-heals the helper modes, and internal helper chaining uses `/system/bin/sh`.
 
+### FCM reconnect recovery on `main`
+
+The current source tree also contains the FCM recovery logic validated on the maintainer's HyperOS + Box/sing-box setup. It does **not** treat a missing TCP/5228 socket as proof of failure, because Google Play services may legitimately fall back to TCP/443. Instead it queries:
+
+```text
+dumpsys activity service com.google.android.gms/.gcm.GcmService
+```
+
+and uses `Is client connected: true/false` as the authoritative runtime signal. On a normal connection it immediately exits. On an explicit disconnect it first allows Google's own reconnect logic to work for 10 minutes. Only if GCM is still disconnected, `sing-box` and `gms.persistent` are both running, and an `mtalk.google.com` DNS probe succeeds does it terminate the persistent GMS process so Android can relaunch it with a fresh reconnect backoff. Failed interventions are rate-limited to 30, 60, then 120 minutes.
+
+The helper does not modify sing-box DNS itself. On the validated device, `mtalk.google.com` / Google FCM DNS was separately routed through a dedicated local/platform resolver in sing-box to avoid dependence on a single upstream DNS server. That Box configuration remains intentionally outside this Magisk module because rewriting arbitrary user proxy configuration would be unsafe.
+
 ## Battery impact
 
-The module itself is event-driven and normally sleeping. The low-frequency safety path runs once every 300 seconds.
+The module itself is event-driven and normally sleeping. The low-frequency safety path runs once every 300 seconds. The FCM guard reuses this existing safety pass; it does not add another polling daemon, alarm, or wakelock. In the healthy state it only reads the GCM service state and exits. A GMS process restart is reserved for the abnormal long-disconnect path described above.
 
 **Important:** exempting an application from Millet/Greeze can increase that application's background activity and battery use. This is expected. Add only apps that genuinely need unrestricted background execution.
 
@@ -125,8 +140,7 @@ Do not confuse this with Android's DeviceIdle/Doze whitelist; they are separate 
 
 ## Security / privacy
 
-- No network access.
-- No telemetry.
+- No telemetry or remote control. The optional FCM recovery guard can issue a single `mtalk.google.com` DNS readiness probe after a confirmed long disconnect; normal healthy checks do not perform that probe.
 - No bundled binaries.
 - No modification of PowerKeeper databases.
 - No global disabling of Millet/Greeze.
