@@ -8,6 +8,13 @@ BB=/data/adb/magisk/busybox
 mkdir -p "$RUNDIR"
 chmod 700 "$RUNDIR"
 chmod 0755 "$MODDIR/bin/inotify_handler.sh" "$MODDIR/bin/reconcile.sh" "$MODDIR/bin/milletctl" "$MODDIR/bin/fcm_guard.sh" 2>/dev/null || true
+# v2.0.2 and newer use owner metadata for the reconcile lock. An ownerless
+# lock left by v2.0.1 can otherwise survive an in-place module upgrade until
+# its first safety pass. Reap only the legacy ownerless form here, before any
+# new reconciliation process can exist.
+if [ -d "$RUNDIR/reconcile.lock" ] && [ ! -f "$RUNDIR/reconcile.lock/owner" ]; then
+  rm -rf "$RUNDIR/reconcile.lock" 2>/dev/null || true
+fi
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
   lines=$(wc -l < "$LOG" 2>/dev/null || echo 0)

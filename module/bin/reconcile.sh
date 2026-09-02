@@ -2,8 +2,75 @@
 MODDIR=${0%/*}/..
 . "$MODDIR/bin/lib.sh"
 LOCK=$RUNDIR/reconcile.lock
-if ! mkdir "$LOCK" 2>/dev/null; then exit 0; fi
-trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+LOCK_OWNER=$LOCK/owner
+
+proc_start_ticks() {
+  pid=$1
+  [ -r "/proc/$pid/stat" ] || return 1
+  awk '{print $22}' "/proc/$pid/stat" 2>/dev/null
+}
+
+lock_owner_alive() {
+  [ -r "$LOCK_OWNER" ] || return 1
+  read -r owner_pid owner_start < "$LOCK_OWNER" 2>/dev/null || return 1
+  case "$owner_pid:$owner_start" in
+    ''|*[!0-9:]*|:*|*:) return 1 ;;
+  esac
+  current_start=$(proc_start_ticks "$owner_pid") || return 1
+  [ "$current_start" = "$owner_start" ] || return 1
+  cmdline=$(tr '\000' ' ' < "/proc/$owner_pid/cmdline" 2>/dev/null)
+  case "$cmdline" in
+    *gms_millet_guard/bin/reconcile.sh*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+lock_age() {
+  lock_mtime=$("$BB" stat -c %Y "$LOCK" 2>/dev/null)
+  now=$(date +%s)
+  case "$lock_mtime:$now" in
+    *[!0-9:]*|:*|*:) echo 0 ;;
+    *) echo $((now-lock_mtime)) ;;
+  esac
+}
+
+acquire_lock() {
+  if mkdir "$LOCK" 2>/dev/null; then
+    start=$(proc_start_ticks $$)
+    [ -n "$start" ] || start=0
+    printf '%s %s\n' "$$" "$start" > "$LOCK_OWNER"
+    return 0
+  fi
+
+  # A live owner means another reconciliation is legitimately in flight.
+  lock_owner_alive && return 1
+
+  # Older releases created an ownerless directory. Avoid racing a process
+  # between mkdir() and writing owner metadata: only reap ownerless locks once
+  # they have been stale for at least 30 seconds.
+  age=$(lock_age)
+  [ "$age" -ge 30 ] 2>/dev/null || return 1
+  log_msg "reconcile[$1]: recovering stale lock age=${age}s"
+  rm -rf "$LOCK" 2>/dev/null || return 1
+
+  if mkdir "$LOCK" 2>/dev/null; then
+    start=$(proc_start_ticks $$)
+    [ -n "$start" ] || start=0
+    printf '%s %s\n' "$$" "$start" > "$LOCK_OWNER"
+    return 0
+  fi
+  return 1
+}
+
+release_lock() {
+  [ -r "$LOCK_OWNER" ] || return 0
+  read -r owner_pid owner_start < "$LOCK_OWNER" 2>/dev/null || return 0
+  [ "$owner_pid" = "$$" ] || return 0
+  rm -rf "$LOCK" 2>/dev/null || true
+}
+
+acquire_lock "$1" || exit 0
+trap 'release_lock' EXIT HUP INT TERM
 [ -f "$CONFIG" ] || {
   cat > "$CONFIG" <<'LIST'
 # Millet Guard managed packages, one per line.
@@ -15,7 +82,11 @@ TMPBASE=$RUNDIR/.base.$$
 TMPDES=$RUNDIR/.desired.$$
 TMPOWN=$RUNDIR/.owned.$$
 TMPNEW=$RUNDIR/.new.$$
-trap 'rm -f "$TMPBASE" "$TMPDES" "$TMPOWN" "$TMPNEW"; rmdir "$LOCK" 2>/dev/null' EXIT
+cleanup() {
+  rm -f "$TMPBASE" "$TMPDES" "$TMPOWN" "$TMPNEW" 2>/dev/null || true
+  release_lock
+}
+trap 'cleanup' EXIT HUP INT TERM
 managed_list > "$TMPDES"
 owned_list > "$TMPOWN"
 # Ownership-aware merge:

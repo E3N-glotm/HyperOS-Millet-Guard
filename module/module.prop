@@ -1,7 +1,7 @@
 id=gms_millet_guard
 name=Millet Guard
-version=2.0.1
-versionCode=201
+version=2.0.2
+versionCode=202
 author=E3N
 summary=Configurable HyperOS Millet/Greeze no-restrict guard
-description=Keeps user-selected apps in MILLET_NO_RESTRICT_APP while preserving unrelated entries. Includes special handling for the Xiaomi GMS limiter when Google Play services is managed.
+description=Keeps user-selected apps in MILLET_NO_RESTRICT_APP while preserving unrelated entries. Includes Xiaomi GMS limiter handling, FCM reconnect recovery, and stale-lock self-healing.

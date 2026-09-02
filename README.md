@@ -20,6 +20,7 @@ Millet Guard does **not** disable Millet/Greeze globally. It maintains a narrow,
 - Special GMS handling: when `com.google.android.gms` is managed, the known Xiaomi GMS limiter is disabled on a best-effort basis.
 - Conservative FCM recovery guard for the tested sing-box/Box setup: it reads GMS's own `GcmService` connection state and only resets a stuck `com.google.android.gms.persistent` reconnect backoff after a confirmed 10-minute disconnect with working mtalk DNS.
 - Permission-safe helper execution: v2.0.1 explicitly invokes internal helpers through `/system/bin/sh` and repairs helper execute bits at service startup, so GMS reconciliation still works if a ZIP extractor installs scripts as `0644`.
+- Crash-safe reconciliation lock: v2.0.2 records the lock owner's PID plus `/proc` start time and automatically reaps stale/legacy locks instead of allowing one interrupted reconciliation to disable the guard indefinitely.
 - No database fighting: PowerKeeper may still show `bgControl=miuiAuto`; the module works at the effective Millet/Greeze layer.
 - Clean uninstall semantics.
 
@@ -117,6 +118,12 @@ The generic `MILLET_NO_RESTRICT_APP` mechanism remains the primary feature. This
 ### v2.0.1 reliability fix
 
 v2.0.1 fixes a failure mode where helper scripts could be extracted without executable bits. In that state the Xiaomi GMS command itself was valid, but the module's direct helper invocation could fail with `Permission denied` before reconciliation reached it. Installation now assigns explicit script modes, service startup self-heals the helper modes, and internal helper chaining uses `/system/bin/sh`.
+
+### v2.0.2 stale-lock recovery
+
+v2.0.2 fixes a second failure mode observed after a `SettingsProvider`/`system_server` interruption. Older releases used a bare `mkdir` directory as the reconciliation mutex. If that shell was killed before its `EXIT` trap ran, `/data/adb/millet_guard/reconcile.lock` could remain forever; every later safety/inotify pass then exited immediately, so the GMS whitelist, Xiaomi limiter disable, and FCM recovery guard all silently stopped running.
+
+The lock now stores the owning shell PID and that process's `/proc/<pid>/stat` start time. A later pass keeps the lock only when both still identify a live Millet Guard reconciliation process. Dead or PID-reused owners are reclaimed automatically, and ownerless locks from v2.0.1 are recovered after a short anti-race grace period. Service startup also removes the legacy ownerless lock before the first boot reconciliation.
 
 ### FCM reconnect recovery on `main`
 
