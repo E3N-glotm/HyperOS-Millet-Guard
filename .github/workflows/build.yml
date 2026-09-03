@@ -11,6 +11,9 @@ jobs:
       - name: Syntax check
         run: |
           for f in module/*.sh module/bin/*; do sh -n "$f"; done
+          sh -n tests/test_reconcile_lock.sh
+      - name: Reconcile lock regression
+        run: sh tests/test_reconcile_lock.sh
       - name: Build
         run: ./build.sh
       - uses: actions/upload-artifact@v4

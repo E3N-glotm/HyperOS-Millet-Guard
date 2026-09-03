@@ -8,6 +8,12 @@ v2.0.1 修复了一个脚本执行权限导致的 GMS limiter 失效问题：部
 
 新版本在安装时显式设置脚本权限，内部调用统一通过 `/system/bin/sh` 执行，并在 `service.sh` 启动时自愈事件监听与核心辅助脚本的执行位。实机已用 `reconcile.sh`、`milletctl` 人为降为 `0644` 的方式回归验证，仍能把 GMS limiter 自动恢复为 `false`，且不会删除其他来源的 Millet 白名单条目。
 
+## v2.0.4 高 CPU 竞态修复
+
+v2.0.4 修复了 `reconcile.sh` 锁所有者检查中的一个窄竞态：旧逻辑在确认 PID 和 `/proc/<pid>/stat` 启动时间后，还会用 Toybox `tr` 读取 `/proc/<pid>/cmdline`。如果目标进程恰好在文件打开后退出，受影响的 HyperOS/Toybox 组合会让 `tr` 对 `read() = ESRCH` 无限重试，造成一个 CPU 核心长期接近满载。
+
+新逻辑不再读取 `cmdline`，锁身份只使用 PID + 内核启动时间 ticks；这已经足以识别 PID 复用。`/proc/<pid>/stat` 也改为 shell 内建 `read` 一次读取，进程在竞态窗口退出时直接失败并按 stale lock 处理，不再产生外部 procfs 读取进程。CI 增加了对应回归测试。
+
 ## 核心思路
 
 - 用户只维护 `/data/adb/millet_guard/packages.list`。

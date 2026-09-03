@@ -22,7 +22,7 @@ Millet Guard does **not** disable Millet/Greeze globally. It maintains a narrow,
 - FCM recovery is independent of Settings reconciliation in v2.0.3. A two-minute userspace fallback plus an event worker that piggybacks on GMS/HyperOS alarm deliveries prevents a reconciliation failure from disabling push recovery, without adding a new Android alarm or wakelock.
 - On the tested Box/TProxy stack, v2.0.3 also self-heals one UID-scoped **FCM-port-only** `BOX_LOCAL` bypass. The GMS UID is resolved dynamically, so a factory reset cannot leave the module targeting an old hard-coded UID.
 - Permission-safe helper execution: v2.0.1 explicitly invokes internal helpers through `/system/bin/sh` and repairs helper execute bits at service startup, so GMS reconciliation still works if a ZIP extractor installs scripts as `0644`.
-- Crash-safe reconciliation lock: v2.0.2 records the lock owner's PID plus `/proc` start time and automatically reaps stale/legacy locks instead of allowing one interrupted reconciliation to disable the guard indefinitely.
+- Crash-safe reconciliation lock: v2.0.2 records the lock owner's PID plus `/proc` start time and automatically reaps stale/legacy locks instead of allowing one interrupted reconciliation to disable the guard indefinitely. v2.0.4 makes that validation proc-race-safe and removes the external `tr`/`cmdline` read that could spin a CPU core if the owner vanished mid-read on affected Toybox builds.
 - No database fighting: PowerKeeper may still show `bgControl=miuiAuto`; the module works at the effective Millet/Greeze layer.
 - Clean uninstall semantics.
 
@@ -143,6 +143,12 @@ The guard is no longer called only from `reconcile.sh`. A dedicated low-frequenc
 
 The helper does not rewrite sing-box JSON. On the validated device, `mtalk.google.com` / Google FCM DNS is separately routed through a dedicated resolver in sing-box. For the tested Box/TProxy layout, v2.0.3 additionally checks whether the `BOX_LOCAL` mangle chain exists and self-heals one **UID-scoped, FCM-port-only** TCP `5228-5230` RETURN rule using the GMS UID discovered from the current install. It intentionally does not create a blanket GMS bypass or mutate arbitrary Box configuration files. See [docs/box-fcm-factory-reset.md](docs/box-fcm-factory-reset.md) for the reproducible network prerequisites.
 
+### v2.0.4 proc-race CPU fix
+
+v2.0.4 hardens the stale-lock owner check after an observed HyperOS/Toybox failure where `reconcile.sh` opened `/proc/<pid>/cmdline`, the owner process exited, and Toybox `tr` then retried `read(2) = ESRCH` indefinitely. The orphaned `tr` process consumed about one CPU core until killed.
+
+Lock identity now relies only on the already-stored owner PID plus `/proc/<pid>/stat` start-time ticks. The stat read is performed by the shell builtin rather than an external procfs reader, so a disappearing owner fails once and is treated as stale. No second `/proc/<pid>/cmdline` read is needed: PID plus start time already distinguishes a live process instance from PID reuse. CI includes a regression check that exercises the production lock helper functions and rejects reintroduction of the cmdline/`tr` path.
+
 ## Factory reset / clean-device setup
 
 A factory reset removes Magisk modules and can assign Google Play services a different Android app UID. Do **not** restore a rule hard-coded to a previous UID such as `10139`.
@@ -152,15 +158,15 @@ For the same validated architecture on a clean device:
 1. Root the device and install your Magisk-compatible environment.
 2. Install/configure Box For Root and sing-box first.
 3. Keep `mtalk.google.com` and TCP `5228-5230` on the direct FCM path; use a dedicated non-recursive FCM DNS resolver.
-4. Keep the Box/TProxy `BOX_LOCAL` mangle chain available. Millet Guard v2.0.3 resolves the current GMS UID itself and restores **only** the TCP `5228-5230` exception if Box rebuilds the chain. Do not add a global GMS bypass.
-5. Install Millet Guard v2.0.3 and reboot. Its default `packages.list` already contains `com.google.android.gms`.
+4. Keep the Box/TProxy `BOX_LOCAL` mangle chain available. Millet Guard v2.0.4 resolves the current GMS UID itself and restores **only** the TCP `5228-5230` exception if Box rebuilds the chain. Do not add a global GMS bypass.
+5. Install Millet Guard v2.0.4 and reboot. Its default `packages.list` already contains `com.google.android.gms`.
 6. Verify `MILLET_NO_RESTRICT_APP`, `mGmsLimitEnabled : false`, `GcmService connected=true`, and an established mtalk socket after boot and after a screen-off cycle.
 
 The exact Box/sing-box snippets and verification commands are documented in [docs/box-fcm-factory-reset.md](docs/box-fcm-factory-reset.md).
 
 ## Battery impact
 
-The Millet reconciliation path is event-driven and normally sleeping, with a five-minute safety check. v2.0.3 adds one sleeping two-minute FCM userspace fallback and one filtered `logcat` observer for existing GMS alarm deliveries. Neither creates an Android AlarmManager timer or acquires a wakelock. In the healthy state the guard only reads GCM service state and exits; DNS/TCP probes happen only after a confirmed disconnect has exceeded the recovery grace period. A GMS process restart is reserved for the abnormal path-aware disconnect case described above.
+The Millet reconciliation path is event-driven and normally sleeping, with a five-minute safety check. v2.0.3 adds one sleeping two-minute FCM userspace fallback and one filtered `logcat` observer for existing GMS alarm deliveries. Neither creates an Android AlarmManager timer or acquires a wakelock. v2.0.4 also removes the procfs/Toybox lock-validation path that was observed to spin a CPU core after a narrow process-exit race. In the healthy state the guard only reads GCM service state and exits; DNS/TCP probes happen only after a confirmed disconnect has exceeded the recovery grace period. A GMS process restart is reserved for the abnormal path-aware disconnect case described above.
 
 **Important:** exempting an application from Millet/Greeze can increase that application's background activity and battery use. This is expected. Add only apps that genuinely need unrestricted background execution.
 

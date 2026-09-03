@@ -6,8 +6,25 @@ LOCK_OWNER=$LOCK/owner
 
 proc_start_ticks() {
   pid=$1
-  [ -r "/proc/$pid/stat" ] || return 1
-  awk '{print $22}' "/proc/$pid/stat" 2>/dev/null
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+
+  # Keep lock-owner validation entirely inside the shell. On the affected
+  # Android/Toybox build an external reader can keep retrying read(2) forever
+  # when a procfs task disappears after open() and read() starts returning
+  # ESRCH. A shell builtin read fails once and lets us treat the owner as dead.
+  stat_line=
+  IFS= read -r stat_line < "/proc/$pid/stat" 2>/dev/null || return 1
+  stat_tail=${stat_line##*) }
+  [ "$stat_tail" != "$stat_line" ] || return 1
+  set -- $stat_tail
+  [ "$#" -ge 20 ] || return 1
+  shift 19
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$1"
 }
 
 lock_owner_alive() {
@@ -18,11 +35,12 @@ lock_owner_alive() {
   esac
   current_start=$(proc_start_ticks "$owner_pid") || return 1
   [ "$current_start" = "$owner_start" ] || return 1
-  cmdline=$(tr '\000' ' ' < "/proc/$owner_pid/cmdline" 2>/dev/null)
-  case "$cmdline" in
-    *gms_millet_guard/bin/reconcile.sh*) return 0 ;;
-    *) return 1 ;;
-  esac
+
+  # PID + kernel start-time ticks identify one process instance across PID
+  # reuse. Do not reopen /proc/<pid>/cmdline: the owner may exit between the
+  # stat check and that second procfs read, which triggered a Toybox tr ESRCH
+  # busy loop on the validated HyperOS device.
+  return 0
 }
 
 lock_age() {
