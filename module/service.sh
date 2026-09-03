@@ -7,7 +7,7 @@ BB=/data/adb/magisk/busybox
 [ -x "$BB" ] || BB=busybox
 mkdir -p "$RUNDIR"
 chmod 700 "$RUNDIR"
-chmod 0755 "$MODDIR/bin/inotify_handler.sh" "$MODDIR/bin/reconcile.sh" "$MODDIR/bin/milletctl" "$MODDIR/bin/fcm_guard.sh" 2>/dev/null || true
+chmod 0755 "$MODDIR/bin/inotify_handler.sh" "$MODDIR/bin/reconcile.sh" "$MODDIR/bin/milletctl" "$MODDIR/bin/fcm_guard.sh" "$MODDIR/bin/fcm_event_worker.sh" 2>/dev/null || true
 # v2.0.2 and newer use owner metadata for the reconcile lock. An ownerless
 # lock left by v2.0.1 can otherwise survive an in-place module upgrade until
 # its first safety pass. Reap only the legacy ownerless form here, before any
@@ -31,7 +31,7 @@ done
 sleep 8
 /system/bin/sh "$MODDIR/bin/reconcile.sh" boot
 # Stop stale module-owned workers.
-for f in inotifyd.pid safety.pid; do
+for f in inotifyd.pid safety.pid fcm.pid fcm_event.pid; do
   if [ -f "$RUNDIR/$f" ]; then
     old=$(cat "$RUNDIR/$f" 2>/dev/null)
     [ -n "$old" ] && kill "$old" 2>/dev/null || true
@@ -48,4 +48,20 @@ echo $! > "$RUNDIR/inotifyd.pid"
   done
 ) >/dev/null 2>&1 &
 echo $! > "$RUNDIR/safety.pid"
-log "started inotify=$(cat "$RUNDIR/inotifyd.pid") safety=$(cat "$RUNDIR/safety.pid")"
+# FCM health is deliberately independent of reconcile.sh. A SettingsProvider
+# failure or reconciliation lock must not disable push recovery again. This is
+# only a fallback: deep suspend can defer shell sleeps, so the event worker
+# below also piggybacks on GMS's own AlarmManager wakeups.
+(
+  while true; do
+    sleep 120
+    grep -Fxq 'com.google.android.gms' "$RUNDIR/packages.list" 2>/dev/null || continue
+    /system/bin/sh "$MODDIR/bin/fcm_guard.sh" poll
+  done
+) >/dev/null 2>&1 &
+echo $! > "$RUNDIR/fcm.pid"
+# No new timer/wakelock: observe existing GMS alarm deliveries and check FCM
+# when HyperOS has already woken the push stack.
+/system/bin/sh "$MODDIR/bin/fcm_event_worker.sh" >/dev/null 2>&1 &
+echo $! > "$RUNDIR/fcm_event.pid"
+log "started inotify=$(cat "$RUNDIR/inotifyd.pid") safety=$(cat "$RUNDIR/safety.pid") fcm=$(cat "$RUNDIR/fcm.pid") fcm_event=$(cat "$RUNDIR/fcm_event.pid")"
