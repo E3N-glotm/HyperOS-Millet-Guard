@@ -14,6 +14,14 @@ v2.0.4 修复了 `reconcile.sh` 锁所有者检查中的一个窄竞态：旧逻
 
 新逻辑不再读取 `cmdline`，锁身份只使用 PID + 内核启动时间 ticks；这已经足以识别 PID 复用。`/proc/<pid>/stat` 也改为 shell 内建 `read` 一次读取，进程在竞态窗口退出时直接失败并按 stale lock 处理，不再产生外部 procfs 读取进程。CI 增加了对应回归测试。
 
+## v2.0.5 FCM DNS 分层自愈
+
+v2.0.5 针对一次实机夜间故障重构了 FCM 自愈判定：原始 MCS 连接先因 heartbeat timeout 关闭，随后 GMS 自己的 `gtalk_connection` 事件进入 `UNKNOWN_HOST`。旧版 Guard 只要直接向 sing-box 配置的上游 DNS 执行 `nslookup mtalk.google.com` 成功，并且目标 `5228-5230` 可达，就会把问题误判为 GMS/MCS 卡死并 `SIGTERM gms.persistent`；然而这条直接查询绕过了 GMS 实际使用的 Android Resolver 路径，因此连续重启并不能修复 `UNKNOWN_HOST`。
+
+新版把“远端链路可达”和“GMS 实际解析链路健康”拆开判断。直连 DNS + TCP 探针仍用于确认外部 FCM 路径，但同时通过 Android libc/netd resolver 解析 `mtalk.google.com`，并读取近期 `gtalk_connection` event log；其中 connection error `3` 按 `UNKNOWN_HOST` 处理。只要近期存在该错误，或 Android Resolver 当前不能解析 mtalk，就**禁止重启 GMS**，优先按 5 分钟限频尝试对活动 resolver NetId 执行 DNS cache `flushnet`，然后保留 GMS 进程让其自行重连。解析恢复后还会等待 300 秒稳定期，避免 DNS 刚恢复就立即触发一次无意义重启。
+
+此外，`fcm_guard.sh` 现在有 PID + `/proc/<pid>/stat` start-time 的单实例锁，防止 2 分钟轮询和 Whetstone 事件监听同时进入自愈流程。`BOX_LOCAL` 中模块维护的精确 `GMS UID + TCP 5228-5230 + RETURN` 规则也会自动去重为一条，并记录当前 UID；若恢复出厂或重装后 GMS UID 改变，会先清理模块记录的旧 UID 规则再建立新规则。
+
 ## 核心思路
 
 - 用户只维护 `/data/adb/millet_guard/packages.list`。
@@ -24,6 +32,8 @@ v2.0.4 修复了 `reconcile.sh` 锁所有者检查中的一个窄竞态：旧逻
 - 每 5 分钟做一次低频保险检查。
 - 如果配置包含 `com.google.android.gms`，额外 best-effort 关闭已知的 Xiaomi GMS 专用 limiter。
 - 内部辅助脚本采用权限鲁棒的调用方式，并在安装/启动阶段恢复所需执行权限。
+- FCM 断线时优先区分 Android DNS 故障与 GMS 进程卡死；DNS 异常期间不重启 GMS。
+- FCM 自愈入口单实例运行，Box 的精确 FCM UID bypass 自动去重。
 
 ## 添加应用
 
