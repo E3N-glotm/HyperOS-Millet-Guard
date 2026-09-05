@@ -157,6 +157,12 @@ The FCM state machine now uses two independent checks. The direct upstream DNS +
 
 `fcm_guard.sh` is also serialized with an owner-validated lock because its two-minute poller and event-driven worker can run concurrently. This prevents duplicate recovery accounting and firewall mutations. The Box exception reconciler now collapses duplicate exact `UID + TCP 5228-5230 + RETURN` rules to one entry and records the currently managed GMS UID, so a package UID change removes the old module-managed exception before installing the new one.
 
+### v2.0.6 lost reconnect-alarm recovery
+
+v2.0.6 fixes a second-stage failure observed on 2026-09-05. The MCS connection entered `UNKNOWN_HOST` at 05:00 and GMS retried normally several times, but after the last `GCM_RECONNECT` wakeup around 05:18 its internal `Reconnect Scheduler Alarm` stayed overdue while AlarmManager no longer contained a matching pending reconnect alarm. The device remained disconnected for nearly eight hours even after Android DNS later recovered. v2.0.5 correctly refused to churn GMS during the DNS failure, but it had no way to repair this lost scheduler state.
+
+The guard now detects an overdue internal reconnect deadline (or a long-disconnected state with no pending `GCM_RECONNECT` alarm) and rate-limits a **soft reconnect** by broadcasting the same `com.google.android.intent.action.GCM_RECONNECT` event normally delivered by GMS's own AlarmManager PendingIntent. This does not terminate Play services. On the affected device, manually delivering that event recovered `mtalk.google.com:5228` within eight seconds while `gms.persistent` kept the same PID. DNS failures still block hard process restarts; the soft reconnect simply rebuilds Google's own reconnect/backoff state and is attempted at most once every five minutes while stalled.
+
 ## Factory reset / clean-device setup
 
 A factory reset removes Magisk modules and can assign Google Play services a different Android app UID. Do **not** restore a rule hard-coded to a previous UID such as `10139`.

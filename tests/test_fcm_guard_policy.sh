@@ -19,16 +19,25 @@ grep -q 'flush_android_dns' "$GUARD" \
   || fail "DNS remediation is missing"
 grep -q 'normalized Box FCM-only bypass' "$GUARD" \
   || fail "FCM bypass deduplication is missing"
+grep -q 'soft_reconnect_if_stalled' "$GUARD" \
+  || fail "lost GMS reconnect-alarm recovery is missing"
+grep -q 'com.google.android.intent.action.GCM_RECONNECT' "$GUARD" \
+  || fail "soft GCM reconnect broadcast is missing"
+grep -q "'in PT-'" "$GUARD" \
+  || fail "overdue GMS reconnect scheduler detection is missing"
 
 unknown_line=$(grep -n 'GMS reported UNKNOWN_HOST' "$GUARD" | head -n1 | cut -d: -f1)
 resolver_line=$(grep -n 'Android resolver cannot resolve mtalk.google.com' "$GUARD" | head -n1 | cut -d: -f1)
 restart_line=$(grep -n 'kill -TERM "$gpid"' "$GUARD" | head -n1 | cut -d: -f1)
+soft_line=$(grep -n 'soft_reconnect_if_stalled "$now" "$outage"' "$GUARD" | tail -n1 | cut -d: -f1)
 [ -n "$unknown_line" ] && [ -n "$resolver_line" ] && [ -n "$restart_line" ] \
   || fail "cannot locate DNS/restart policy branches"
 [ "$unknown_line" -lt "$restart_line" ] \
   || fail "UNKNOWN_HOST gate must run before GMS restart"
 [ "$resolver_line" -lt "$restart_line" ] \
   || fail "Android resolver gate must run before GMS restart"
+[ -n "$soft_line" ] && [ "$soft_line" -lt "$restart_line" ] \
+  || fail "soft reconnect must run before hard GMS restart"
 
 kill_count=$(grep -c 'kill -TERM "$gpid"' "$GUARD" || true)
 [ "$kill_count" -eq 1 ] \

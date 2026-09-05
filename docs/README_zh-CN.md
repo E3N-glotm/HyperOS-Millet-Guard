@@ -22,6 +22,12 @@ v2.0.5 针对一次实机夜间故障重构了 FCM 自愈判定：原始 MCS 连
 
 此外，`fcm_guard.sh` 现在有 PID + `/proc/<pid>/stat` start-time 的单实例锁，防止 2 分钟轮询和 Whetstone 事件监听同时进入自愈流程。`BOX_LOCAL` 中模块维护的精确 `GMS UID + TCP 5228-5230 + RETURN` 规则也会自动去重为一条，并记录当前 UID；若恢复出厂或重装后 GMS UID 改变，会先清理模块记录的旧 UID 规则再建立新规则。
 
+## v2.0.6 GMS 重连闹钟丢失自愈
+
+2026-09-05 的实机故障进一步暴露了第二层问题：05:00 左右 MCS 因心跳超时进入 `UNKNOWN_HOST` 后，GMS 自己先正常执行了多轮 `GCM_RECONNECT`；最后一次约在 05:18。随后 GcmService 内部仍显示 `Reconnect Scheduler Alarm` 已经逾期数小时，但 Android AlarmManager 中已经不存在对应的 `GCM_RECONNECT` pending alarm。也就是说 GMS 认为自己已经安排了下一次重连，而系统实际上没有可触发的重连闹钟，最终形成约 8 小时断联。v2.0.5 在 DNS 异常期间正确避免了反复杀 GMS，但只做 DNS flush 并等待 GMS 自己重连，无法修复这个“重连调度器丢闹钟”的死锁。
+
+v2.0.6 增加软重连层：当 GcmService 的内部重连期限已经明显逾期，或持续断线超过 5 分钟且 AlarmManager 中没有 `GCM_RECONNECT` 时，Guard 会限频发送一次 GMS 原本应由 AlarmManager 投递的 `com.google.android.intent.action.GCM_RECONNECT`。它不会杀死或重启 Play services；在本次故障现场手工发送同一事件后，原 `gms.persistent` PID 保持不变，并在 8 秒内重新建立 `mtalk.google.com:5228` 连接。DNS 不健康时仍禁止硬重启，软重连最多每 5 分钟触发一次，用于重建 GMS 自己的 backoff/alarm 状态。
+
 ## 核心思路
 
 - 用户只维护 `/data/adb/millet_guard/packages.list`。

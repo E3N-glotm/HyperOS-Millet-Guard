@@ -9,6 +9,7 @@ PATHLOG_FILE=$RUNDIR/fcm_path_fail_log.epoch
 DNSLOG_FILE=$RUNDIR/fcm_dns_fail_log.epoch
 DNSFAIL_FILE=$RUNDIR/fcm_dns_fail.epoch
 DNSFLUSH_FILE=$RUNDIR/fcm_dns_flush.epoch
+SOFT_RECONNECT_FILE=$RUNDIR/fcm_soft_reconnect.epoch
 BYPASS_UID_FILE=$RUNDIR/fcm_bypass.uid
 LOCK=$RUNDIR/fcm_guard.lock
 LOCK_OWNER=$LOCK/owner
@@ -138,6 +139,78 @@ fcm_state() {
     *false*) echo disconnected ;;
     *)       echo unknown ;;
   esac
+}
+
+gcm_reconnect_alarm_pending() {
+  run_timeout dumpsys alarm 2>/dev/null \
+    | grep -Fq '*walarm*:com.google.android.intent.action.GCM_RECONNECT'
+}
+
+gcm_reconnect_scheduler_state() {
+  # GcmService prints an ISO-8601-style relative duration. A negative
+  # component (for example "in PT-7H-47M") means the scheduler still believes
+  # a reconnect alarm is due even though its deadline is already in the past.
+  # The 2026-09-05 incident showed the corresponding AlarmManager entry can
+  # disappear completely while this stale internal deadline remains.
+  scheduler_line=$(run_timeout dumpsys activity service com.google.android.gms/.gcm.GcmService 2>/dev/null \
+    | grep -m1 'Reconnect Scheduler Alarm:' || true)
+  case "$scheduler_line" in
+    *'in PT-'*) echo overdue; return 0 ;;
+    *'in PT'*)  echo scheduled; return 0 ;;
+  esac
+  if gcm_reconnect_alarm_pending; then
+    echo scheduled
+  else
+    echo missing
+  fi
+}
+
+soft_reconnect_if_stalled() {
+  soft_now=$1
+  soft_outage=$2
+  [ "$soft_outage" -ge 120 ] 2>/dev/null || return 1
+
+  scheduler_state=$(gcm_reconnect_scheduler_state)
+  case "$scheduler_state" in
+    overdue) soft_reason=overdue-scheduler ;;
+    missing)
+      # Avoid racing the short window between one reconnect attempt and GMS
+      # registering its next alarm. A completely missing scheduler is only
+      # considered stuck after five minutes of continuous disconnection.
+      [ "$soft_outage" -ge 300 ] 2>/dev/null || return 1
+      soft_reason=missing-alarm
+      ;;
+    *) return 1 ;;
+  esac
+
+  soft_last=$(cat "$SOFT_RECONNECT_FILE" 2>/dev/null)
+  case "$soft_last" in ''|*[!0-9]*) soft_last=0;; esac
+  [ $((soft_now-soft_last)) -ge 300 ] 2>/dev/null || return 1
+  printf '%s\n' "$soft_now" > "$SOFT_RECONNECT_FILE"
+
+  # This is the same reconnect event GMS normally receives from its own
+  # AlarmManager PendingIntent. It does not kill/restart Play services and is
+  # safe to use while DNS is unhealthy: a failed attempt simply lets GMS
+  # rebuild its normal reconnect backoff/alarm state.
+  log_msg "FCM guard: reconnect scheduler $soft_reason outage=${soft_outage}s; sending soft GCM_RECONNECT"
+  if ! "$BB" timeout 8 am broadcast --user 0 \
+      -a com.google.android.intent.action.GCM_RECONNECT \
+      -p com.google.android.gms >/dev/null 2>&1; then
+    log_msg "FCM guard: soft GCM_RECONNECT broadcast failed"
+    return 1
+  fi
+  sleep 8
+
+  if [ "$(fcm_state)" = "connected" ]; then
+    endpoint=$(run_timeout dumpsys activity service com.google.android.gms/.gcm.GcmService 2>/dev/null \
+      | grep -m1 'connected=' | sed 's/^[[:space:]]*//' || true)
+    log_msg "FCM guard: soft reconnect recovered ${endpoint:-endpoint-unavailable}"
+    rm -f "$DOWN_FILE" "$ATTEMPT_FILE" "$PATHLOG_FILE" "$DNSLOG_FILE" "$DNSFAIL_FILE" "$SOFT_RECONNECT_FILE" 2>/dev/null || true
+    return 0
+  fi
+
+  log_msg "FCM guard: soft reconnect delivered but GcmService remains disconnected"
+  return 1
 }
 
 configured_fcm_dns() {
@@ -304,7 +377,7 @@ now=$(date +%s)
 state=$(fcm_state)
 case "$state" in
   connected)
-    rm -f "$DOWN_FILE" "$ATTEMPT_FILE" "$PATHLOG_FILE" "$DNSLOG_FILE" "$DNSFAIL_FILE" 2>/dev/null || true
+    rm -f "$DOWN_FILE" "$ATTEMPT_FILE" "$PATHLOG_FILE" "$DNSLOG_FILE" "$DNSFAIL_FILE" "$SOFT_RECONNECT_FILE" 2>/dev/null || true
     exit 0
     ;;
   unknown)
@@ -341,6 +414,7 @@ if [ "$outage" -ge 60 ] 2>/dev/null; then
       remember_dns_failure "$unknown_epoch"
       flush_android_dns "$now"
       rate_limited_dns_log "$now" "GMS reported UNKNOWN_HOST ${unknown_age}s ago; DNS remediation only, no GMS restart"
+      soft_reconnect_if_stalled "$now" "$outage" || true
       exit 0
     fi
   fi
@@ -350,6 +424,7 @@ if [ "$outage" -ge 60 ] 2>/dev/null; then
     remember_dns_failure "$now"
     flush_android_dns "$now"
     rate_limited_dns_log "$now" "Android resolver cannot resolve mtalk.google.com; DNS remediation only, no GMS restart"
+    soft_reconnect_if_stalled "$now" "$outage" || true
     exit 0
   fi
 
@@ -359,6 +434,13 @@ if [ "$outage" -ge 60 ] 2>/dev/null; then
     rate_limited_dns_log "$now" "Android resolver recovered mtalk=$android_ip but is inside 300s stability grace; no GMS restart"
     exit 0
   fi
+fi
+
+# A healthy resolver is not enough if GMS lost its own reconnect alarm. Repair
+# that scheduler state before considering a process restart. The live incident
+# on 2026-09-05 recovered in seconds from this broadcast with the same GMS PID.
+if soft_reconnect_if_stalled "$now" "$outage"; then
+  exit 0
 fi
 
 # Give Google's own reconnect logic five minutes before intervention. The old
@@ -407,7 +489,7 @@ sleep 20
 
 state2=$(fcm_state)
 if [ "$state2" = "connected" ]; then
-  rm -f "$DOWN_FILE" "$ATTEMPT_FILE" "$PATHLOG_FILE" "$DNSLOG_FILE" "$DNSFAIL_FILE" 2>/dev/null || true
+  rm -f "$DOWN_FILE" "$ATTEMPT_FILE" "$PATHLOG_FILE" "$DNSLOG_FILE" "$DNSFAIL_FILE" "$SOFT_RECONNECT_FILE" 2>/dev/null || true
   newpid=$(pidof com.google.android.gms.persistent 2>/dev/null | awk '{print $1}')
   endpoint=$(run_timeout dumpsys activity service com.google.android.gms/.gcm.GcmService 2>/dev/null \
     | grep -m1 'connected=' | sed 's/^[[:space:]]*//' || true)
