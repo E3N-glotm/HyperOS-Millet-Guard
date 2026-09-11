@@ -13,7 +13,8 @@ SOFT_RECONNECT_FILE=$RUNDIR/fcm_soft_reconnect.epoch
 BYPASS_UID_FILE=$RUNDIR/fcm_bypass.uid
 LOCK=$RUNDIR/fcm_guard.lock
 LOCK_OWNER=$LOCK/owner
-BOX_CONFIG=/data/adb/box/sing-box/config.json
+BOX_IPTABLES=/data/adb/box/scripts/box.iptables
+IPTABLES_WAIT_SECONDS=5
 
 proc_start_ticks() {
   pid=$1
@@ -76,7 +77,8 @@ release_guard_lock() {
 
 fcm_rule_count() {
   rule_uid=$1
-  iptables -t mangle -S BOX_LOCAL 2>/dev/null | awk -v uid="$rule_uid" '
+  rules=$(iptables -w "$IPTABLES_WAIT_SECONDS" -t mangle -S BOX_LOCAL 2>/dev/null) || return 1
+  printf '%s\n' "$rules" | awk -v uid="$rule_uid" '
     $1 == "-A" && $2 == "BOX_LOCAL" {
       owner=0; port=0; ret=0
       for (i=1; i<=NF; i++) {
@@ -92,13 +94,19 @@ fcm_rule_count() {
 
 delete_fcm_rules_for_uid() {
   delete_uid=$1
-  delete_count=$(fcm_rule_count "$delete_uid")
+  delete_count=$(fcm_rule_count "$delete_uid") || return 1
   case "$delete_count" in ''|*[!0-9]*) delete_count=0;; esac
   while [ "$delete_count" -gt 0 ] 2>/dev/null; do
-    iptables -t mangle -D BOX_LOCAL -p tcp -m owner --uid-owner "$delete_uid" \
+    iptables -w "$IPTABLES_WAIT_SECONDS" -t mangle -D BOX_LOCAL -p tcp -m owner --uid-owner "$delete_uid" \
       -m tcp --dport 5228:5230 -j RETURN >/dev/null 2>&1 || break
     delete_count=$((delete_count-1))
   done
+}
+
+box_manages_fcm_bypass() {
+  [ -r "$BOX_IPTABLES" ] || return 1
+  grep -q 'GMS_UID' "$BOX_IPTABLES" 2>/dev/null \
+    && grep -q '5228:5230' "$BOX_IPTABLES" 2>/dev/null
 }
 
 ensure_fcm_uid_bypass() {
@@ -106,7 +114,7 @@ ensure_fcm_uid_bypass() {
   # When the tested Box/TProxy chain exists, maintain one narrow FCM-only rule
   # instead of relying on a restored --uid-owner value from an older install.
   command -v iptables >/dev/null 2>&1 || return 0
-  iptables -t mangle -S BOX_LOCAL >/dev/null 2>&1 || return 0
+  iptables -w "$IPTABLES_WAIT_SECONDS" -t mangle -S BOX_LOCAL >/dev/null 2>&1 || return 0
   gms_uid=$(pm list packages -U com.google.android.gms 2>/dev/null \
     | awk '$1 == "package:com.google.android.gms" { sub(/^uid:/, "", $2); print $2; exit }')
   case "$gms_uid" in ''|*[!0-9]*) return 0;; esac
@@ -114,17 +122,34 @@ ensure_fcm_uid_bypass() {
   old_uid=$(cat "$BYPASS_UID_FILE" 2>/dev/null)
   case "$old_uid" in ''|*[!0-9]*) old_uid=;; esac
   if [ -n "$old_uid" ] && [ "$old_uid" != "$gms_uid" ]; then
-    delete_fcm_rules_for_uid "$old_uid"
-    log_msg "FCM guard: removed stale managed Box FCM bypass old_uid=$old_uid"
+    if delete_fcm_rules_for_uid "$old_uid"; then
+      log_msg "FCM guard: removed stale managed Box FCM bypass old_uid=$old_uid"
+    fi
   fi
 
-  count=$(fcm_rule_count "$gms_uid")
+  count=$(fcm_rule_count "$gms_uid") || return 0
   case "$count" in ''|*[!0-9]*) count=0;; esac
-  if [ "$count" -ne 1 ] 2>/dev/null; then
-    [ "$count" -gt 0 ] 2>/dev/null && delete_fcm_rules_for_uid "$gms_uid"
-    if iptables -t mangle -I BOX_LOCAL 1 -p tcp -m owner --uid-owner "$gms_uid" \
-        -m tcp --dport 5228:5230 -j RETURN >/dev/null 2>&1; then
-      log_msg "FCM guard: normalized Box FCM-only bypass uid=$gms_uid ports=5228:5230 previous_count=$count"
+  if [ "$count" -eq 0 ] 2>/dev/null; then
+    # Box For Root also installs the same narrow GMS rule on the validated
+    # setup. During a chain rebuild there is a short interval after BOX_LOCAL
+    # is flushed but before Box re-adds its rule. Do not race that window:
+    # wait for the native owner first, then self-heal only if the rule is still
+    # genuinely absent. Duplicate rules are harmless and are deliberately not
+    # normalized here because delete/reinsert churn can interleave with Box.
+    if box_manages_fcm_bypass; then
+      retry=0
+      while [ "$retry" -lt 3 ] 2>/dev/null; do
+        sleep 1
+        count=$(fcm_rule_count "$gms_uid") || return 0
+        [ "$count" -gt 0 ] 2>/dev/null && break
+        retry=$((retry+1))
+      done
+    fi
+    if [ "$count" -eq 0 ] 2>/dev/null \
+        && iptables -w "$IPTABLES_WAIT_SECONDS" -t mangle -I BOX_LOCAL 1 \
+          -p tcp -m owner --uid-owner "$gms_uid" \
+          -m tcp --dport 5228:5230 -j RETURN >/dev/null 2>&1; then
+      log_msg "FCM guard: installed missing Box FCM-only bypass uid=$gms_uid ports=5228:5230"
     fi
   fi
   printf '%s\n' "$gms_uid" > "$BYPASS_UID_FILE"
@@ -213,40 +238,15 @@ soft_reconnect_if_stalled() {
   return 1
 }
 
-configured_fcm_dns() {
-  [ -r "$BOX_CONFIG" ] || return 1
-  awk -F'"' '
-    $2 == "tag" && $4 == "fcm" { want=1; next }
-    want && $2 == "server" { print $4; exit }
-    want && /}/ { want=0 }
-  ' "$BOX_CONFIG" 2>/dev/null
-}
-
-resolve_mtalk() {
-  # Prefer the resolver used by the tested sing-box FCM DNS rule. Keep public
-  # fallbacks so an older/restored Box config does not make diagnostics blind.
-  configured=$(configured_fcm_dns 2>/dev/null || true)
-  for resolver in "$configured" 61.139.2.69 223.5.5.5 119.29.29.29; do
-    [ -n "$resolver" ] || continue
-    out=$("$BB" timeout 7 "$BB" nslookup mtalk.google.com "$resolver" 2>/dev/null || true)
-    ip=$(printf '%s\n' "$out" | awk '
-      /^Name:/ { seen=1; next }
-      seen && /^Address [0-9]+: / { print $3; exit }
-    ')
-    case "$ip" in
-      *.*.*.*) printf '%s %s\n' "$resolver" "$ip"; return 0 ;;
-    esac
-  done
-  return 1
-}
-
 fcm_path_ready() {
-  pair=$(resolve_mtalk) || return 1
-  resolver=${pair%% *}
-  ip=${pair#* }
+  # Use the same Android resolver path as GMS. A direct nslookup from the
+  # module shell is not an independent probe on TProxy systems because Box may
+  # hijack it back through the same sing-box DNS policy.
+  ip=$(android_resolve_mtalk 2>/dev/null || true)
+  [ -n "$ip" ] || return 1
   for port in 5228 5229 5230; do
     if "$BB" timeout 6 "$BB" nc -z -w 4 "$ip" "$port" >/dev/null 2>&1; then
-      printf '%s %s %s\n' "$resolver" "$ip" "$port"
+      printf '%s %s %s\n' android "$ip" "$port"
       return 0
     fi
   done
@@ -327,12 +327,26 @@ flush_android_dns() {
 
   flushed=0
   for netid in $(dns_netids); do
-    if command -v ndc >/dev/null 2>&1 \
-        && "$BB" timeout 5 ndc resolver flushnet "$netid" >/dev/null 2>&1; then
-      flushed=$((flushed+1))
-      continue
+    if command -v ndc >/dev/null 2>&1; then
+      ndc_out=$("$BB" timeout 5 ndc resolver flushnet "$netid" 2>&1)
+      ndc_rc=$?
+      case "$ndc_out" in
+        *'Command not recognized'*|*'Failure calling service'*|*'Failed transaction'*|*'Exception'*) ndc_ok=0 ;;
+        [45][0-9][0-9]' '*) ndc_ok=0 ;;
+        *) [ "$ndc_rc" -eq 0 ] 2>/dev/null && ndc_ok=1 || ndc_ok=0 ;;
+      esac
+      if [ "$ndc_ok" -eq 1 ] 2>/dev/null; then
+        flushed=$((flushed+1))
+        continue
+      fi
     fi
-    if "$BB" timeout 5 cmd netd resolver flushnet "$netid" >/dev/null 2>&1; then
+    cmd_out=$("$BB" timeout 5 cmd netd resolver flushnet "$netid" 2>&1)
+    cmd_rc=$?
+    case "$cmd_out" in
+      *'Command not recognized'*|*'Failure calling service'*|*'Failed transaction'*|*'Exception'*) cmd_ok=0 ;;
+      *) [ "$cmd_rc" -eq 0 ] 2>/dev/null && cmd_ok=1 || cmd_ok=0 ;;
+    esac
+    if [ "$cmd_ok" -eq 1 ] 2>/dev/null; then
       flushed=$((flushed+1))
     fi
   done
@@ -481,7 +495,7 @@ ip=${rest%% *}
 port=${rest##* }
 android_ip=$(android_resolve_mtalk 2>/dev/null || true)
 [ -n "$android_ip" ] || exit 0
-log_msg "FCM guard: outage=${outage}s direct_path=ok resolver=$resolver endpoint=$ip:$port android_resolver=$android_ip; restarting gms.persistent pid=$gpid attempt=$((attempts+1))"
+log_msg "FCM guard: outage=${outage}s fcm_path=ok resolver=$resolver endpoint=$ip:$port android_resolver=$android_ip; restarting gms.persistent pid=$gpid attempt=$((attempts+1))"
 echo "$now" > "$LAST_FILE"
 echo $((attempts+1)) > "$ATTEMPT_FILE"
 kill -TERM "$gpid" 2>/dev/null || exit 0

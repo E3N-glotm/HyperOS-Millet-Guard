@@ -18,15 +18,25 @@ v2.0.4 修复了 `reconcile.sh` 锁所有者检查中的一个窄竞态：旧逻
 
 v2.0.5 针对一次实机夜间故障重构了 FCM 自愈判定：原始 MCS 连接先因 heartbeat timeout 关闭，随后 GMS 自己的 `gtalk_connection` 事件进入 `UNKNOWN_HOST`。旧版 Guard 只要直接向 sing-box 配置的上游 DNS 执行 `nslookup mtalk.google.com` 成功，并且目标 `5228-5230` 可达，就会把问题误判为 GMS/MCS 卡死并 `SIGTERM gms.persistent`；然而这条直接查询绕过了 GMS 实际使用的 Android Resolver 路径，因此连续重启并不能修复 `UNKNOWN_HOST`。
 
-新版把“远端链路可达”和“GMS 实际解析链路健康”拆开判断。直连 DNS + TCP 探针仍用于确认外部 FCM 路径，但同时通过 Android libc/netd resolver 解析 `mtalk.google.com`，并读取近期 `gtalk_connection` event log；其中 connection error `3` 按 `UNKNOWN_HOST` 处理。只要近期存在该错误，或 Android Resolver 当前不能解析 mtalk，就**禁止重启 GMS**，优先按 5 分钟限频尝试对活动 resolver NetId 执行 DNS cache `flushnet`，然后保留 GMS 进程让其自行重连。解析恢复后还会等待 300 秒稳定期，避免 DNS 刚恢复就立即触发一次无意义重启。
+v2.0.5 增加了 Android libc/netd resolver 判定，并读取近期 `gtalk_connection` event log；其中 connection error `3` 按 `UNKNOWN_HOST` 处理。只要近期存在该错误，或 Android Resolver 当前不能解析 mtalk，就**禁止重启 GMS**。在系统确实提供可用 resolver cache flush 接口时可限频尝试；不支持的命令不会再被当成成功。解析恢复后还会等待 300 秒稳定期，避免 DNS 刚恢复就立即触发一次无意义重启。自 v2.0.7 起，不再把 direct `nslookup` 当成独立的上游 DNS 证据，因为 Box 的 DNS hijack 本身可能再次截获这次查询；只有 Android 自己先成功解析出 mtalk 地址后，才继续验证 TCP `5228-5230` 可达性。
 
-此外，`fcm_guard.sh` 现在有 PID + `/proc/<pid>/stat` start-time 的单实例锁，防止 2 分钟轮询和 Whetstone 事件监听同时进入自愈流程。`BOX_LOCAL` 中模块维护的精确 `GMS UID + TCP 5228-5230 + RETURN` 规则也会自动去重为一条，并记录当前 UID；若恢复出厂或重装后 GMS UID 改变，会先清理模块记录的旧 UID 规则再建立新规则。
+此外，`fcm_guard.sh` 有 PID + `/proc/<pid>/stat` start-time 的单实例锁，防止 2 分钟轮询和 Whetstone 事件监听同时进入自愈流程。模块会记录当前 GMS UID；若恢复出厂或重装后 UID 改变，会先清理模块记录的旧 UID 规则。v2.0.7 对 `BOX_LOCAL` 的读取和写入统一等待 xtables lock，并且不再在正常检查中通过“删光再插一条”进行重复规则归一化，以免和 Box 自己的链重建互相竞争。
 
 ## v2.0.6 GMS 重连闹钟丢失自愈
 
 2026-09-05 的实机故障进一步暴露了第二层问题：05:00 左右 MCS 因心跳超时进入 `UNKNOWN_HOST` 后，GMS 自己先正常执行了多轮 `GCM_RECONNECT`；最后一次约在 05:18。随后 GcmService 内部仍显示 `Reconnect Scheduler Alarm` 已经逾期数小时，但 Android AlarmManager 中已经不存在对应的 `GCM_RECONNECT` pending alarm。也就是说 GMS 认为自己已经安排了下一次重连，而系统实际上没有可触发的重连闹钟，最终形成约 8 小时断联。v2.0.5 在 DNS 异常期间正确避免了反复杀 GMS，但只做 DNS flush 并等待 GMS 自己重连，无法修复这个“重连调度器丢闹钟”的死锁。
 
 v2.0.6 增加软重连层：当 GcmService 的内部重连期限已经明显逾期，或持续断线超过 5 分钟且 AlarmManager 中没有 `GCM_RECONNECT` 时，Guard 会限频发送一次 GMS 原本应由 AlarmManager 投递的 `com.google.android.intent.action.GCM_RECONNECT`。它不会杀死或重启 Play services；在本次故障现场手工发送同一事件后，原 `gms.persistent` PID 保持不变，并在 8 秒内重新建立 `mtalk.google.com:5228` 连接。DNS 不健康时仍禁止硬重启，软重连最多每 5 分钟触发一次，用于重建 GMS 自己的 backoff/alarm 状态。
+
+## v2.0.7 xtables 与 DNS 路径加固
+
+2026-09-11 的连续审计定位到两个确定问题。第一，旧版 `fcm_rule_count()` 直接执行 `iptables -S BOX_LOCAL` 且不等待 `/system/etc/xtables.lock`。当 Android/netd/Box 正在持锁时，读取会立即失败；stderr 又被丢弃，后续 `awk` 会输出 `0`，于是 Guard 把一次锁竞争误判成“FCM bypass 不存在”，插入重复规则，下一轮又看到 `2`。v2.0.7 对 Box 链的读取/写入统一使用有界 `iptables -w`，读取失败时 fail-closed；若 Box 自己也维护同一条精确 FCM 规则，会先短暂等待原生重建完成，只在规则持续缺失时补一条。
+
+第二，Android 16 上 `ndc resolver flushnet` 可输出 `500 0 Command not recognized`，但 `ndc` 自身退出码仍为 `0`。v2.0.6 因此会把实际没有发生的 DNS flush 记录成成功。v2.0.7 同时验证返回文本和退出码，遇到 `Command not recognized`、binder transaction failure 等情况明确按“不支持”处理。
+
+同一轮实机对照还证明：此前给 FCM 固定使用的 `61.139.2.69` 在蜂窝网络上稳定，但在当时 Wi-Fi 上完全直连失败；临时完全绕开 Box DNS hijack 后，`223.5.5.5`、`119.29.29.29`、`114.114.114.114` 均能直接成功。因此 FCM DNS 不应盲目固定运营商 DNS，必须分别验证实际使用的 Wi-Fi 和蜂窝路径。
+
+另外，定制 Box 网络监控的 `/data/adb/box/run/net.heal.lock` 从 9 月 3 日起成为永久 stale lock，同时 `net.signature` 卡在 `__offline__`。仓库在 `extras/box-for-root/net.inotify` 提供经过加固的第三方兼容脚本：在任何 iptables 操作前获取 PID + start-time 锁，先 debounce 并重新采样，然后**先提交稳定 network signature，再执行一次 Box restart**。这样 restart 自己产生的 route/rule event 再进入 handler 时已经看到相同 signature，会立即 no-op，从结构上切断网络回环。该脚本不会由 Millet Guard 静默覆盖到其他用户的 Box 安装。
 
 ## 核心思路
 
@@ -39,7 +49,7 @@ v2.0.6 增加软重连层：当 GcmService 的内部重连期限已经明显逾�
 - 如果配置包含 `com.google.android.gms`，额外 best-effort 关闭已知的 Xiaomi GMS 专用 limiter。
 - 内部辅助脚本采用权限鲁棒的调用方式，并在安装/启动阶段恢复所需执行权限。
 - FCM 断线时优先区分 Android DNS 故障与 GMS 进程卡死；DNS 异常期间不重启 GMS。
-- FCM 自愈入口单实例运行，Box 的精确 FCM UID bypass 自动去重。
+- FCM 自愈入口单实例运行；Box 的精确 FCM UID bypass 使用 xtables 等待并仅在持续缺失时自愈，不在正常检查中反复删插。
 
 ## 添加应用
 

@@ -17,14 +17,29 @@ grep -q 'android_resolve_mtalk' "$GUARD" \
   || fail "Android resolver path is not checked"
 grep -q 'flush_android_dns' "$GUARD" \
   || fail "DNS remediation is missing"
-grep -q 'normalized Box FCM-only bypass' "$GUARD" \
-  || fail "FCM bypass deduplication is missing"
+grep -q 'IPTABLES_WAIT_SECONDS=5' "$GUARD" \
+  || fail "iptables lock wait is missing"
+grep -q 'iptables -w "$IPTABLES_WAIT_SECONDS" -t mangle -S BOX_LOCAL' "$GUARD" \
+  || fail "FCM bypass reads do not wait for the xtables lock"
+grep -q 'installed missing Box FCM-only bypass' "$GUARD" \
+  || fail "FCM bypass self-heal is missing"
+grep -q 'box_manages_fcm_bypass' "$GUARD" \
+  || fail "native Box rule ownership is not detected"
 grep -q 'soft_reconnect_if_stalled' "$GUARD" \
   || fail "lost GMS reconnect-alarm recovery is missing"
 grep -q 'com.google.android.intent.action.GCM_RECONNECT' "$GUARD" \
   || fail "soft GCM reconnect broadcast is missing"
 grep -q "'in PT-'" "$GUARD" \
   || fail "overdue GMS reconnect scheduler detection is missing"
+grep -q 'Command not recognized' "$GUARD" \
+  || fail "Android 16 ndc false-success output is not rejected"
+grep -q 'Failure calling service' "$GUARD" \
+  || fail "failed cmd resolver transactions are not rejected"
+grep -q 'ip=$(android_resolve_mtalk' "$GUARD" \
+  || fail "FCM path probe does not use Android resolver parity"
+if grep -q '61[.]139[.]2[.]69' "$GUARD"; then
+  fail "carrier-specific FCM DNS must not be hard-coded in the guard"
+fi
 
 unknown_line=$(grep -n 'GMS reported UNKNOWN_HOST' "$GUARD" | head -n1 | cut -d: -f1)
 resolver_line=$(grep -n 'Android resolver cannot resolve mtalk.google.com' "$GUARD" | head -n1 | cut -d: -f1)

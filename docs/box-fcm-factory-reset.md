@@ -14,14 +14,17 @@ The validated sing-box configuration has a DNS server tagged `fcm` and routes
 {
   "type": "udp",
   "tag": "fcm",
-  "server": "61.139.2.69"
+  "server": "223.5.5.5"
 }
 ```
 
 The important property is that this resolver must not recurse back through the
 same local DNS interception path. Use a resolver that is reachable directly on
-your network; the address above is the one used on the validated device, not a
-universal requirement.
+every network you actually use. On 2026-09-11 the previously used
+carrier-specific `61.139.2.69` resolver worked well on cellular but timed out on
+the validated Wi-Fi path, while `223.5.5.5` worked directly during the incident
+test. The address above is therefore representative, not universal. Do not pin
+FCM to one carrier DNS without testing both Wi-Fi and cellular paths.
 
 ## 2. Route the FCM transport directly
 
@@ -58,15 +61,21 @@ case "$GMS_UID" in
 esac
 ```
 
-Millet Guard v2.0.3 performs this lookup itself whenever its FCM guard runs. If
+Millet Guard performs this lookup itself whenever its FCM guard runs. If
 the tested `BOX_LOCAL` mangle chain exists, it checks for and restores only this
 FCM-port bypass:
 
 ```sh
-[ -n "$GMS_UID" ] && iptables -t mangle -I BOX_LOCAL 1 \
+[ -n "$GMS_UID" ] && iptables -w 5 -t mangle -I BOX_LOCAL 1 \
   -p tcp -m owner --uid-owner "$GMS_UID" \
   -m tcp --dport 5228:5230 -j RETURN
 ```
+
+v2.0.7 waits for the xtables lock before reading or writing this chain. If Box
+itself owns the same exact FCM rule, the guard waits briefly for Box to finish a
+rebuild before self-healing a genuinely missing rule. It no longer
+deletes/reinserts duplicate live rules during normal checks, avoiding a race
+with Box's own chain rebuild.
 
 This means the validated TProxy setup does not depend on a persisted numeric UID
 after a factory reset, and a later Box rule rebuild is repaired by the next FCM
@@ -120,6 +129,8 @@ Millet Guard can automatically repair the following module-side failures:
 - the tested Box/TProxy chain is rebuilt and loses the GMS FCM-port exception;
   the current GMS UID is rediscovered and the narrow rule is restored.
 
-It cannot repair a genuinely unreachable carrier/Wi-Fi path, a broken Box
-installation, or a sing-box configuration that loops its own DNS. Those are
-network-layer prerequisites and must be restored after a factory reset.
+It cannot repair a genuinely unreachable carrier/Wi-Fi path or a sing-box
+configuration that loops its own DNS. If you use the custom Box network monitor
+from this project's validated setup, see `extras/box-for-root/net.inotify` for
+the stale-lock/anti-loop hardened handler. Millet Guard deliberately does not
+overwrite that third-party file automatically.
