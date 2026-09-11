@@ -1,0 +1,232 @@
+#!/system/bin/sh
+
+# Hardened Box For Root network-context handler used by the validated
+# HyperOS/Millet Guard setup. It intentionally performs no ip route/ip rule
+# mutation itself. The stable network signature is committed before any
+# iptables refresh or Box restart so restart-generated route events cannot feed
+# back into another restart.
+
+events=$1
+
+export PATH="/data/adb/magisk:/data/adb/ksu/bin:/data/adb/ap/bin:$PATH:/system/bin"
+
+buildVersion=$(getprop ro.build.version.release)
+buildVersionMajor=${buildVersion%%.*}
+IPV="iptables"
+IP6V="ip6tables"
+if [ "$buildVersionMajor" -ge 11 ] 2>/dev/null; then
+  IPV="iptables -w 100"
+  IP6V="ip6tables -w 100"
+fi
+
+iptables="${IPV}"
+ip6tables="${IP6V}"
+logs="/data/adb/box/run"
+box_dir="/data/adb/box"
+state_file="${logs}/net.signature"
+error_state_file="${logs}/net.default_error.count"
+cooldown_file="${logs}/net.heal.epoch"
+lock_dir="${logs}/net.heal.lock"
+lock_owner="${lock_dir}/owner"
+service_path="${box_dir}/scripts/box.service"
+singbox_log="${logs}/sing-box.log"
+restart_cooldown=15
+
+proc_start_ticks() {
+  pid=$1
+  case "$pid" in ''|*[!0-9]*) return 1;; esac
+  stat_line=
+  IFS= read -r stat_line < "/proc/$pid/stat" 2>/dev/null || return 1
+  stat_tail=${stat_line##*) }
+  [ "$stat_tail" != "$stat_line" ] || return 1
+  set -- $stat_tail
+  [ "$#" -ge 20 ] || return 1
+  shift 19
+  case "$1" in ''|*[!0-9]*) return 1;; esac
+  printf '%s\n' "$1"
+}
+
+lock_owner_alive() {
+  [ -r "$lock_owner" ] || return 1
+  read -r owner_pid owner_start < "$lock_owner" 2>/dev/null || return 1
+  case "$owner_pid:$owner_start" in ''|*[!0-9:]*|:*|*:) return 1;; esac
+  current_start=$(proc_start_ticks "$owner_pid") || return 1
+  [ "$current_start" = "$owner_start" ]
+}
+
+lock_age() {
+  lock_mtime=$(busybox stat -c %Y "$lock_dir" 2>/dev/null)
+  lock_now=$(date +%s)
+  case "$lock_mtime:$lock_now" in
+    *[!0-9:]*|:*|*:) echo 0;;
+    *) echo $((lock_now-lock_mtime));;
+  esac
+}
+
+acquire_net_lock() {
+  if mkdir "$lock_dir" 2>/dev/null; then
+    start=$(proc_start_ticks $$)
+    [ -n "$start" ] || start=0
+    printf '%s %s\n' "$$" "$start" > "$lock_owner"
+    return 0
+  fi
+  lock_owner_alive && return 1
+  age=$(lock_age)
+  [ "$age" -ge 30 ] 2>/dev/null || return 1
+  echo "[Info]: recovering stale network-context lock age=${age}s" >> "${logs}/net.log"
+  rm -rf "$lock_dir" 2>/dev/null || return 1
+  if mkdir "$lock_dir" 2>/dev/null; then
+    start=$(proc_start_ticks $$)
+    [ -n "$start" ] || start=0
+    printf '%s %s\n' "$$" "$start" > "$lock_owner"
+    return 0
+  fi
+  return 1
+}
+
+release_net_lock() {
+  [ -r "$lock_owner" ] || return 0
+  read -r owner_pid owner_start < "$lock_owner" 2>/dev/null || return 0
+  [ "$owner_pid" = "$$" ] || return 0
+  rm -rf "$lock_dir" 2>/dev/null || true
+}
+
+atomic_write() {
+  target=$1
+  value=$2
+  tmp="${target}.tmp.$$"
+  printf '%s\n' "$value" > "$tmp" || return 1
+  mv "$tmp" "$target"
+}
+
+network_signature() {
+  ip -4 -o addr show scope global up 2>/dev/null \
+    | busybox awk '{print $2 "=" $4}' \
+    | busybox sort \
+    | busybox tr '\n' ';'
+}
+
+missing_default_count() {
+  [ -f "$singbox_log" ] || {
+    echo 0
+    return
+  }
+  count=$(grep -c 'missing default interface' "$singbox_log" 2>/dev/null || true)
+  echo "${count:-0}"
+}
+
+rules_add() {
+  has_mangle_v4=false
+  has_nat_v4=false
+  has_mangle_v6=false
+
+  ${iptables} -t mangle -S LOCAL_IP_V4 >/dev/null 2>&1 && has_mangle_v4=true
+  ${iptables} -t nat -S LOCAL_IP_V4 >/dev/null 2>&1 && has_nat_v4=true
+  ${ip6tables} -t mangle -S LOCAL_IP_V6 >/dev/null 2>&1 && has_mangle_v6=true
+
+  $has_mangle_v4 && ${iptables} -t mangle -F LOCAL_IP_V4
+  $has_nat_v4 && ${iptables} -t nat -F LOCAL_IP_V4
+
+  ip -4 a | busybox awk '/inet/ {print $2}' | grep -vE '^127[.]0[.]0[.]1' | while read -r local_ipv4; do
+    inserted=false
+    if $has_mangle_v4; then
+      ${iptables} -t mangle -A LOCAL_IP_V4 -d "$local_ipv4" -j ACCEPT && inserted=true
+    fi
+    if $has_nat_v4; then
+      ${iptables} -t nat -A LOCAL_IP_V4 -d "$local_ipv4" -j ACCEPT && inserted=true
+    fi
+    $inserted && echo "[Info]: local ip is $local_ipv4, anti-loopback rule has been inserted" >> "${logs}/net.log" 2>&1
+  done
+
+  if $has_mangle_v6; then
+    ${ip6tables} -t mangle -F LOCAL_IP_V6
+    ip -6 a | busybox awk '/inet6/ {print $2}' | grep -vE '^fe80|^::1|^fd00' | while read -r local_ipv6; do
+      ${ip6tables} -t mangle -A LOCAL_IP_V6 -d "$local_ipv6" -j ACCEPT
+      [ "$?" = "0" ] && echo "[Info]: local ip is $local_ipv6, anti-loopback rule has been inserted" >> "${logs}/net.log" 2>&1
+    done
+  fi
+}
+
+[ "$events" = "w" ] || exit 0
+[ -f "/data/adb/box/run/box.pid" ] || exit 0
+
+current_signature=$(network_signature)
+old_signature=""
+[ -f "$state_file" ] && old_signature=$(cat "$state_file" 2>/dev/null)
+
+if [ -z "$current_signature" ]; then
+  [ "$old_signature" = "__offline__" ] || atomic_write "$state_file" "__offline__"
+  exit 0
+fi
+
+error_count=$(missing_default_count)
+handled_error_count=0
+[ -f "$error_state_file" ] && handled_error_count=$(cat "$error_state_file" 2>/dev/null)
+
+if [ "$current_signature" = "$old_signature" ] && [ "$error_count" -le "$handled_error_count" ] 2>/dev/null; then
+  exit 0
+fi
+
+# Serialize BEFORE rules_add/restart. The old implementation acquired its lock
+# only after rules_add, allowing concurrent rtnetlink events to churn iptables.
+acquire_net_lock || exit 0
+trap 'release_net_lock' EXIT HUP INT TERM
+
+# Debounce route/link bursts and recompute everything after owning the lock.
+sleep 2
+stable_signature=$(network_signature)
+if [ -z "$stable_signature" ]; then
+  atomic_write "$state_file" "__offline__"
+  exit 0
+fi
+
+old_signature=""
+[ -f "$state_file" ] && old_signature=$(cat "$state_file" 2>/dev/null)
+error_count=$(missing_default_count)
+handled_error_count=0
+[ -f "$error_state_file" ] && handled_error_count=$(cat "$error_state_file" 2>/dev/null)
+
+signature_changed=0
+error_changed=0
+[ "$stable_signature" != "$old_signature" ] && signature_changed=1
+[ "$error_count" -gt "$handled_error_count" ] 2>/dev/null && error_changed=1
+[ "$signature_changed" -eq 1 ] 2>/dev/null || [ "$error_changed" -eq 1 ] 2>/dev/null || exit 0
+
+# Commit the state BEFORE any operation that can itself emit route/rule events.
+# This ordering is the loop breaker: restart-generated rtnetlink events observe
+# the new signature and become no-ops.
+atomic_write "$state_file" "$stable_signature" || exit 0
+atomic_write "$error_state_file" "$error_count" || exit 0
+
+if [ "$signature_changed" -eq 1 ] 2>/dev/null; then
+  rules_add
+fi
+
+now_epoch=$(date +%s)
+last_epoch=0
+[ -f "$cooldown_file" ] && last_epoch=$(cat "$cooldown_file" 2>/dev/null)
+case "$last_epoch" in ''|*[!0-9]*) last_epoch=0;; esac
+# A genuinely new stable interface/address signature gets exactly one restart.
+# The state was already committed above, so route/rule events emitted by that
+# restart cannot recurse. Cooldown applies only to same-signature error-driven
+# healing, where repeated log errors could otherwise cause unnecessary churn.
+if [ "$signature_changed" -eq 0 ] 2>/dev/null \
+    && [ $((now_epoch-last_epoch)) -lt "$restart_cooldown" ] 2>/dev/null; then
+  echo "[Info]: network state committed; Box restart suppressed by ${restart_cooldown}s cooldown" >> "${logs}/net.log"
+  exit 0
+fi
+atomic_write "$cooldown_file" "$now_epoch" || exit 0
+
+echo "[Info]: stable network context changed or sing-box lost its default interface; refreshing Box/sing-box once" >> "${logs}/net.log"
+"$service_path" restart >> "${logs}/net.log" 2>&1
+rc=$?
+if [ "$rc" = "0" ]; then
+  atomic_write "$error_state_file" "$(missing_default_count)"
+  echo "[Info]: Box/sing-box network-context refresh completed" >> "${logs}/net.log"
+  [ -x /data/adb/modules/gms_millet_guard/bin/fcm_guard.sh ] \
+    && /system/bin/sh /data/adb/modules/gms_millet_guard/bin/fcm_guard.sh network-event >/dev/null 2>&1 &
+else
+  echo "[Error]: Box/sing-box network-context refresh failed rc=$rc; state remains committed to prevent a restart storm" >> "${logs}/net.log"
+fi
+
+exit "$rc"

@@ -1,0 +1,21 @@
+name: Box compatibility patch
+
+on:
+  push:
+    branches:
+      - compat/box-for-root-network-stability
+  pull_request:
+    paths:
+      - 'extras/box-for-root/**'
+      - 'tests/test_box_compat_branch.sh'
+      - '.github/workflows/box-compat.yml'
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax and anti-loop regression
+        run: sh tests/test_box_compat_branch.sh
+
