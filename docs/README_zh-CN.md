@@ -100,6 +100,12 @@ su -c '/data/adb/modules/gms_millet_guard/bin/milletctl swipe-remove com.tencent
 
 `setPackageStoppedState()` 的 Binder transaction 编号不会写死；模块从当前手机自身的 `framework.jar` 动态解析，并与 `ro.build.fingerprint` 一起缓存，系统升级后会重新发现。
 
+## v2.0.9 SwipeUpClean 日志缓冲区修复
+
+真实最近任务上划验收发现 v2.0.8 还有一个集成缺陷：事件 worker 只监听了 logcat 的 `main` buffer，但当前 HyperOS 会把决定性的 `ActivityManager: Force stopping ... : SwipeUpClean` 写入 `system` buffer。因此手工注入同格式事件时 helper 能正常清除 `stopped`，真实上划后却可能完全收不到事件，随后 GMS 会记录 `Failed to broadcast to stopped app`。
+
+v2.0.9 同时监听 `main` 与 `system`。匹配条件仍严格限定为 `SwipeUpClean`，不会扩大到应用信息页“强行停止”、`am force-stop` 或其他清理原因。
+
 ## 注意
 
 加入 no-restrict 的应用可能增加后台运行和耗电。只添加确实需要可靠后台执行的应用。

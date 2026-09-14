@@ -17,6 +17,8 @@ grep -q 'Force stopping .*: SwipeUpClean' "$WORKER" \
   || fail "event worker does not filter exact SwipeUpClean force-stop events"
 grep -q 'ActivityManager:I' "$WORKER" \
   || fail "event worker is not subscribed to ActivityManager"
+grep -q 'logcat -b main -b system' "$WORKER" \
+  || fail "event worker must read the system buffer where HyperOS logs SwipeUpClean"
 grep -q 'swipe_unstop.sh' "$WORKER" \
   || fail "event worker does not call the swipe helper"
 if grep -qE 'OneKeyClean|from pid|force-stop package' "$WORKER"; then

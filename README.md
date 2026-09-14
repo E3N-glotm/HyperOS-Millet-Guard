@@ -195,6 +195,20 @@ Example:
 su -c '/data/adb/modules/gms_millet_guard/bin/milletctl swipe-add com.tencent.mm'
 ```
 
+### v2.0.9 SwipeUpClean event-buffer fix
+
+Real Recents-swipe validation on the maintained HyperOS device exposed one
+v2.0.8 integration bug: the worker listened only to logcat's `main` buffer,
+while HyperOS writes the decisive `ActivityManager: Force stopping ... :
+SwipeUpClean` record to the `system` buffer. As a result the helper worked when
+the exact event was injected manually, but a physical swipe could still leave
+the app stopped and the next FCM was rejected as `Failed to broadcast to
+stopped app`.
+
+v2.0.9 listens to both `main` and `system`. Matching remains restricted to the
+exact `SwipeUpClean` reason; normal app-info/shell force-stop semantics are not
+changed.
+
 ## Factory reset / clean-device setup
 
 A factory reset removes Magisk modules and can assign Google Play services a different Android app UID. Do **not** restore a rule hard-coded to a previous UID such as `10139`.

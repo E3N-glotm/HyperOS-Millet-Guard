@@ -6,13 +6,17 @@ MODDIR=${0%/*}/..
 # of repeatedly spawning an unsupported logcat command.
 logcat --help 2>&1 | grep -q -- '--regex' || exit 0
 
-# One logcat stream serves two independent event-driven paths:
+# One merged logcat stream serves two independent event-driven paths:
 # 1) existing GMS AlarmManager wakeups -> FCM health check;
 # 2) HyperOS ActivityManager SwipeUpClean force-stop -> opt-in package unstop.
 # The second path deliberately matches only the explicit SwipeUpClean reason.
 # App-info / shell / policy force-stops are therefore left untouched.
+#
+# HyperOS logs the ActivityManager/ProcessSceneCleaner SwipeUpClean records in
+# the system buffer on the validated device, while Whetstone alarm deliveries
+# are visible in main. Listen to both buffers so neither event path is lost.
 while true; do
-  logcat -b main -v brief -T 1 \
+  logcat -b main -b system -v brief -T 1 \
     --regex='sourcePkg=com.google.android.gms|Force stopping .*: SwipeUpClean' \
     -s whetstone.activity:I ActivityManager:I '*:S' 2>/dev/null \
   | while IFS= read -r _line; do
