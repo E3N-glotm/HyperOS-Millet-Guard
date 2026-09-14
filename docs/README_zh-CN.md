@@ -69,42 +69,11 @@ su -c '/data/adb/modules/gms_millet_guard/bin/milletctl remove com.tencent.mm'
 su -c '/data/adb/modules/gms_millet_guard/bin/milletctl status'
 ```
 
-## 最近任务上划后仍允许 FCM 唤醒（v2.0.8，可选）
+## v2.1.0 职责边界修正
 
-部分 HyperOS 版本会把“从最近任务上划应用”实现成真正的 `force-stop`。这会把 Android 包状态设置成 `stopped=true`。此时即使 Google Play 服务已经收到有效的高优先级 FCM，系统仍会记录 `Failed to broadcast to stopped app ...`，直到用户再次手动打开应用。
+v2.1.0 撤销 v2.0.8/v2.0.9 引入的实验性 package `stopped` 状态干预。后续实机取证确认，此前被误判为 HyperOS 新增 FCM 冷启动故障的主要原因，是设备原本启用的专用 HyperOS FCM LSPosed 兼容模块在一次 LSPosed/Zygisk 维护过程中消失。恢复该模块后，在 Millet Guard 不清除 `stopped` 状态的情况下，真实 HIGH 优先级 FCM 已重新能够成功投递并拉起无进程应用。
 
-Millet Guard v2.0.8 提供一个独立、默认关闭的兼容功能。它只监听原因**明确为 `SwipeUpClean`** 的 ActivityManager force-stop 事件；对加入专用名单的包，仅清除 `stopped` 标志，不重新打开界面，也不恢复刚刚被清掉的进程或最近任务卡片。这样后续 FCM 仍可按 Android 正常机制重新拉起应用。
-
-例如为微信启用：
-
-```sh
-su -c '/data/adb/modules/gms_millet_guard/bin/milletctl swipe-add com.tencent.mm'
-```
-
-查看或移除：
-
-```sh
-su -c '/data/adb/modules/gms_millet_guard/bin/milletctl swipe-list'
-su -c '/data/adb/modules/gms_millet_guard/bin/milletctl swipe-remove com.tencent.mm'
-```
-
-专用名单位于：
-
-```text
-/data/adb/millet_guard/swipe_keepalive.list
-```
-
-该功能与 `packages.list` / `MILLET_NO_RESTRICT_APP` 相互独立。默认名单为空，不会改变其他应用行为。
-
-为避免破坏用户真正的“强行停止”意图，该功能**不会**处理应用信息页“强行停止”、`am force-stop`、一键清理或其他非 `SwipeUpClean` 原因。上述操作仍会正常留下 `stopped=true`。
-
-`setPackageStoppedState()` 的 Binder transaction 编号不会写死；模块从当前手机自身的 `framework.jar` 动态解析，并与 `ro.build.fingerprint` 一起缓存，系统升级后会重新发现。
-
-## v2.0.9 SwipeUpClean 日志缓冲区修复
-
-真实最近任务上划验收发现 v2.0.8 还有一个集成缺陷：事件 worker 只监听了 logcat 的 `main` buffer，但当前 HyperOS 会把决定性的 `ActivityManager: Force stopping ... : SwipeUpClean` 写入 `system` buffer。因此手工注入同格式事件时 helper 能正常清除 `stopped`，真实上划后却可能完全收不到事件，随后 GMS 会记录 `Failed to broadcast to stopped app`。
-
-v2.0.9 同时监听 `main` 与 `system`。匹配条件仍严格限定为 `SwipeUpClean`，不会扩大到应用信息页“强行停止”、`am force-stop` 或其他清理原因。
+因此 Millet Guard 回归原始职责：维护 Millet/Greeze no-restrict、处理 Xiaomi GMS limiter、修复 GMS/FCM 网络与重连状态，以及维护窄范围 Box/iptables 兼容规则。v2.1.0 不再监听 `SwipeUpClean`，不再调用 `setPackageStoppedState()`，也不再维护 `swipe_keepalive.list`。Android/HyperOS 自身的 force-stop、package stopped 与自启动语义保持不变；需要 FCM 冷启动兼容时应由专门负责该层的模块处理。
 
 ## 注意
 

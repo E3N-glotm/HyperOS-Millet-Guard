@@ -13,7 +13,7 @@ jobs:
           for f in module/*.sh module/bin/*; do sh -n "$f"; done
           sh -n tests/test_reconcile_lock.sh
           sh -n tests/test_fcm_guard_policy.sh
-          sh -n tests/test_swipe_unstop_policy.sh
+          sh -n tests/test_scope_boundaries.sh
           sh -n extras/box-for-root/net.inotify
           sh -n tests/test_box_net_inotify_policy.sh
           bash -n tests/test_release_line_endings.sh
@@ -21,8 +21,8 @@ jobs:
         run: sh tests/test_reconcile_lock.sh
       - name: FCM DNS recovery regression
         run: sh tests/test_fcm_guard_policy.sh
-      - name: SwipeUpClean FCM eligibility regression
-        run: sh tests/test_swipe_unstop_policy.sh
+      - name: Module scope regression
+        run: sh tests/test_scope_boundaries.sh
       - name: Box network anti-loop regression
         run: sh tests/test_box_net_inotify_policy.sh
       - name: Build

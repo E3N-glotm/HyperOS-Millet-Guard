@@ -1,7 +1,7 @@
 id=gms_millet_guard
 name=Millet Guard
-version=2.0.9
-versionCode=209
+version=2.1.0
+versionCode=210
 author=E3N
 summary=Configurable HyperOS Millet/Greeze no-restrict guard
-description=Keeps user-selected apps in MILLET_NO_RESTRICT_APP while preserving unrelated entries. Includes DNS-aware FCM recovery, lost-reconnect-alarm self-healing, xtables-lock-safe firewall checks, and opt-in HyperOS SwipeUpClean FCM eligibility restoration.
+description=Keeps user-selected apps in MILLET_NO_RESTRICT_APP while preserving unrelated entries. Includes Xiaomi GMS limiter handling, DNS-aware FCM recovery, lost-reconnect-alarm self-healing, xtables-lock-safe firewall checks, and race-safe stale-lock handling.

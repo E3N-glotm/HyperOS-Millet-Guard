@@ -84,13 +84,6 @@ su -c '/data/adb/modules/gms_millet_guard/bin/milletctl remove com.tencent.mm'
 # Show effective state
 su -c '/data/adb/modules/gms_millet_guard/bin/milletctl status'
 
-# Opt in an app whose HyperOS recent-task swipe currently force-stops it.
-# This is separate from the Millet no-restrict list.
-su -c '/data/adb/modules/gms_millet_guard/bin/milletctl swipe-add com.tencent.mm'
-
-# List/remove SwipeUpClean protection
-su -c '/data/adb/modules/gms_millet_guard/bin/milletctl swipe-list'
-su -c '/data/adb/modules/gms_millet_guard/bin/milletctl swipe-remove com.tencent.mm'
 ```
 
 The Magisk **Action** button is read-only/diagnostic apart from running one idempotent reconciliation.
@@ -179,35 +172,22 @@ Second, Android 16 can return `500 0 Command not recognized` from `ndc resolver 
 
 The validated device additionally exposed a Box network-monitor stale lock and a carrier-specific FCM DNS single point. The hardened third-party handler is provided at `extras/box-for-root/net.inotify`: it recovers stale locks by PID/start-time, serializes before iptables mutation, and commits the stable network signature before a single Box restart so restart-generated route events cannot recurse. It is intentionally not auto-installed. The FCM DNS guidance now requires testing the selected resolver on both Wi-Fi and cellular rather than copying a carrier DNS address.
 
-### v2.0.8 opt-in SwipeUpClean FCM eligibility restoration
+### v2.1.0 scope correction
 
-On the validated HyperOS build, manually swiping an app away from Recents can be implemented as `ProcessSceneCleaner -> force-stop`, not merely as killing its process. Android then sets the package `stopped` bit. A valid HIGH-priority FCM can still reach Google Play services, but Android rejects delivery with `Failed to broadcast to stopped app ...` until the user explicitly launches the app again.
+v2.1.0 removes the experimental package stopped-state manipulation introduced
+in v2.0.8/v2.0.9. Follow-up device forensics showed that the apparent new FCM
+cold-start regression was caused by a previously enabled, dedicated HyperOS FCM
+LSPosed compatibility module disappearing from the device during unrelated
+LSPosed/Zygisk maintenance. After restoring that module, real HIGH-priority FCM
+delivery to process-dead applications recovered without Millet Guard clearing
+their package `stopped` state.
 
-v2.0.8 adds an **opt-in** compatibility path for this narrow case. The existing event worker watches only ActivityManager force-stop records whose reason is exactly `SwipeUpClean`. For packages listed in `/data/adb/millet_guard/swipe_keepalive.list`, it clears only the package stopped bit after HyperOS has completed the swipe cleanup. It does not relaunch the app or restore its removed task/processes; it only makes the package eligible for a future FCM wakeup again.
-
-The Binder transaction for `IPackageManager.setPackageStoppedState()` is discovered from the device's own `framework.jar` and cached together with `ro.build.fingerprint`, so a firmware update cannot silently reuse a transaction number from an older framework. The module verifies the resulting package state after the Binder call.
-
-This feature is deliberately separate from `packages.list` and defaults to an empty list. It also deliberately does **not** match app-info **Force stop**, `am force-stop`, One-Key Clean, or other policy force-stop reasons. Those explicit stopped states remain intact.
-
-Example:
-
-```sh
-su -c '/data/adb/modules/gms_millet_guard/bin/milletctl swipe-add com.tencent.mm'
-```
-
-### v2.0.9 SwipeUpClean event-buffer fix
-
-Real Recents-swipe validation on the maintained HyperOS device exposed one
-v2.0.8 integration bug: the worker listened only to logcat's `main` buffer,
-while HyperOS writes the decisive `ActivityManager: Force stopping ... :
-SwipeUpClean` record to the `system` buffer. As a result the helper worked when
-the exact event was injected manually, but a physical swipe could still leave
-the app stopped and the next FCM was rejected as `Failed to broadcast to
-stopped app`.
-
-v2.0.9 listens to both `main` and `system`. Matching remains restricted to the
-exact `SwipeUpClean` reason; normal app-info/shell force-stop semantics are not
-changed.
+Millet Guard therefore returns to its original responsibility boundary: Millet/
+Greeze no-restrict ownership, GMS limiter handling, FCM connection/network
+recovery, and the narrow Box/iptables compatibility path. It no longer watches
+`SwipeUpClean`, no longer calls `setPackageStoppedState()`, and does not attempt
+to replace dedicated FCM cold-start compatibility modules. Explicit Android and
+HyperOS package stop/autostart semantics are left untouched.
 
 ## Factory reset / clean-device setup
 
