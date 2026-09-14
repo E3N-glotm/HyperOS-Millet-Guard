@@ -69,6 +69,37 @@ su -c '/data/adb/modules/gms_millet_guard/bin/milletctl remove com.tencent.mm'
 su -c '/data/adb/modules/gms_millet_guard/bin/milletctl status'
 ```
 
+## 最近任务上划后仍允许 FCM 唤醒（v2.0.8，可选）
+
+部分 HyperOS 版本会把“从最近任务上划应用”实现成真正的 `force-stop`。这会把 Android 包状态设置成 `stopped=true`。此时即使 Google Play 服务已经收到有效的高优先级 FCM，系统仍会记录 `Failed to broadcast to stopped app ...`，直到用户再次手动打开应用。
+
+Millet Guard v2.0.8 提供一个独立、默认关闭的兼容功能。它只监听原因**明确为 `SwipeUpClean`** 的 ActivityManager force-stop 事件；对加入专用名单的包，仅清除 `stopped` 标志，不重新打开界面，也不恢复刚刚被清掉的进程或最近任务卡片。这样后续 FCM 仍可按 Android 正常机制重新拉起应用。
+
+例如为微信启用：
+
+```sh
+su -c '/data/adb/modules/gms_millet_guard/bin/milletctl swipe-add com.tencent.mm'
+```
+
+查看或移除：
+
+```sh
+su -c '/data/adb/modules/gms_millet_guard/bin/milletctl swipe-list'
+su -c '/data/adb/modules/gms_millet_guard/bin/milletctl swipe-remove com.tencent.mm'
+```
+
+专用名单位于：
+
+```text
+/data/adb/millet_guard/swipe_keepalive.list
+```
+
+该功能与 `packages.list` / `MILLET_NO_RESTRICT_APP` 相互独立。默认名单为空，不会改变其他应用行为。
+
+为避免破坏用户真正的“强行停止”意图，该功能**不会**处理应用信息页“强行停止”、`am force-stop`、一键清理或其他非 `SwipeUpClean` 原因。上述操作仍会正常留下 `stopped=true`。
+
+`setPackageStoppedState()` 的 Binder transaction 编号不会写死；模块从当前手机自身的 `framework.jar` 动态解析，并与 `ro.build.fingerprint` 一起缓存，系统升级后会重新发现。
+
 ## 注意
 
 加入 no-restrict 的应用可能增加后台运行和耗电。只添加确实需要可靠后台执行的应用。

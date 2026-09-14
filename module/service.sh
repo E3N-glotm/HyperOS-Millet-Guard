@@ -7,7 +7,12 @@ BB=/data/adb/magisk/busybox
 [ -x "$BB" ] || BB=busybox
 mkdir -p "$RUNDIR"
 chmod 700 "$RUNDIR"
-chmod 0755 "$MODDIR/bin/inotify_handler.sh" "$MODDIR/bin/reconcile.sh" "$MODDIR/bin/milletctl" "$MODDIR/bin/fcm_guard.sh" "$MODDIR/bin/fcm_event_worker.sh" 2>/dev/null || true
+SWIPE_CONFIG=$RUNDIR/swipe_keepalive.list
+if [ ! -f "$SWIPE_CONFIG" ]; then
+  printf '%s\n' '# Opt-in packages whose SwipeUpClean stopped state should be cleared.' > "$SWIPE_CONFIG"
+fi
+chmod 600 "$SWIPE_CONFIG" 2>/dev/null || true
+chmod 0755 "$MODDIR/bin/inotify_handler.sh" "$MODDIR/bin/reconcile.sh" "$MODDIR/bin/milletctl" "$MODDIR/bin/fcm_guard.sh" "$MODDIR/bin/fcm_event_worker.sh" "$MODDIR/bin/swipe_unstop.sh" 2>/dev/null || true
 # v2.0.2 and newer use owner metadata for the reconcile lock. An ownerless
 # lock left by v2.0.1 can otherwise survive an in-place module upgrade until
 # its first safety pass. Reap only the legacy ownerless form here, before any

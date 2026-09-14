@@ -1,6 +1,7 @@
 #!/system/bin/sh
 MODDIR=${0%/*}/..
 . "$MODDIR/bin/lib.sh"
+SWIPE_CONFIG=$RUNDIR/swipe_keepalive.list
 usage() {
   cat <<'TXT'
 Millet Guard control
@@ -10,12 +11,23 @@ Millet Guard control
   milletctl status
   milletctl apply
   milletctl config
+  milletctl swipe-list
+  milletctl swipe-add <package.name>
+  milletctl swipe-remove <package.name>
+  milletctl swipe-config
 TXT
 }
 ensure_config() {
   mkdir -p "$RUNDIR"
   [ -f "$CONFIG" ] || printf '%s\n' 'com.google.android.gms' > "$CONFIG"
   chmod 600 "$CONFIG"
+}
+ensure_swipe_config() {
+  mkdir -p "$RUNDIR"
+  if [ ! -f "$SWIPE_CONFIG" ]; then
+    printf '%s\n' '# Opt-in packages whose SwipeUpClean stopped state should be cleared.' > "$SWIPE_CONFIG"
+  fi
+  chmod 600 "$SWIPE_CONFIG"
 }
 cmd=$1
 case "$cmd" in
@@ -46,8 +58,10 @@ case "$cmd" in
     ;;
   status)
     ensure_config
+    ensure_swipe_config
     echo "Config: $CONFIG"
     echo 'Managed:'; managed_list | sed 's/^/  /'
+    echo 'SwipeUpClean protection:'; normalize_file "$SWIPE_CONFIG" | while IFS= read -r p; do valid_pkg "$p" && echo "  $p"; done
     echo "Effective MILLET_NO_RESTRICT_APP: $(settings --user 0 get system MILLET_NO_RESTRICT_APP 2>/dev/null)"
     echo "Millet master: $(getprop persist.sys.powmillet.enable)"
     echo "GMS limiter: $(run_timeout dumpsys greezer 2>/dev/null | grep -m1 'mGmsLimitEnabled' || echo unavailable)"
@@ -60,6 +74,34 @@ case "$cmd" in
   config)
     ensure_config
     echo "$CONFIG"
+    ;;
+  swipe-list)
+    ensure_swipe_config
+    echo 'SwipeUpClean-protected packages:'
+    normalize_file "$SWIPE_CONFIG" | while IFS= read -r p; do valid_pkg "$p" && echo "  $p"; done
+    ;;
+  swipe-add)
+    ensure_swipe_config
+    pkg=$2
+    valid_pkg "$pkg" || { echo "Invalid package name: $pkg" >&2; exit 2; }
+    if ! normalize_file "$SWIPE_CONFIG" | grep -Fxq "$pkg"; then
+      printf '%s\n' "$pkg" >> "$SWIPE_CONFIG"
+    fi
+    chmod 600 "$SWIPE_CONFIG"
+    echo "SwipeUpClean protection added: $pkg"
+    ;;
+  swipe-remove|swipe-rm|swipe-del)
+    ensure_swipe_config
+    pkg=$2
+    valid_pkg "$pkg" || { echo "Invalid package name: $pkg" >&2; exit 2; }
+    tmp=$SWIPE_CONFIG.tmp.$$
+    awk -v p="$pkg" '$0!=p' "$SWIPE_CONFIG" > "$tmp" && mv -f "$tmp" "$SWIPE_CONFIG"
+    chmod 600 "$SWIPE_CONFIG"
+    echo "SwipeUpClean protection removed: $pkg"
+    ;;
+  swipe-config)
+    ensure_swipe_config
+    echo "$SWIPE_CONFIG"
     ;;
   *) usage; exit 1 ;;
 esac
