@@ -11,6 +11,8 @@ DNSFAIL_FILE=$RUNDIR/fcm_dns_fail.epoch
 DNSFLUSH_FILE=$RUNDIR/fcm_dns_flush.epoch
 SOFT_RECONNECT_FILE=$RUNDIR/fcm_soft_reconnect.epoch
 BYPASS_UID_FILE=$RUNDIR/fcm_bypass.uid
+KEEPALIVE_FILE=$RUNDIR/fcm_keepalive.epoch
+KEEPALIVE_INTERVAL=900
 LOCK=$RUNDIR/fcm_guard.lock
 LOCK_OWNER=$LOCK/owner
 BOX_IPTABLES=/data/adb/box/scripts/box.iptables
@@ -164,6 +166,38 @@ fcm_state() {
     *false*) echo disconnected ;;
     *)       echo unknown ;;
   esac
+}
+
+connected_keepalive() {
+  ka_now=$1
+  ka_last=$(cat "$KEEPALIVE_FILE" 2>/dev/null)
+  case "$ka_last" in ''|*[!0-9]*) ka_last=0;; esac
+  [ $((ka_now-ka_last)) -ge "$KEEPALIVE_INTERVAL" ] 2>/dev/null || return 0
+  printf '%s\n' "$ka_now" > "$KEEPALIVE_FILE"
+
+  # GcmService can report connected=true while the underlying MCS socket has
+  # already gone stale behind a mobile/NAT path. Sending Google's own native
+  # heartbeat is a low-impact liveness probe: a healthy socket just sends the
+  # heartbeat; a stale socket is closed and reconnected by GMS itself.
+  before_endpoint=$(run_timeout dumpsys activity service com.google.android.gms/.gcm.GcmService 2>/dev/null \
+    | grep -m1 'connected=' | sed 's/^[[:space:]]*//' || true)
+  if ! "$BB" timeout 8 am broadcast --user 0 \
+      -a com.google.android.intent.action.MCS_HEARTBEAT \
+      -p com.google.android.gms >/dev/null 2>&1; then
+    log_msg "FCM guard: proactive MCS heartbeat broadcast failed"
+    return 1
+  fi
+  sleep 2
+
+  after_state=$(fcm_state)
+  after_endpoint=$(run_timeout dumpsys activity service com.google.android.gms/.gcm.GcmService 2>/dev/null \
+    | grep -m1 'connected=' | sed 's/^[[:space:]]*//' || true)
+  if [ "$after_state" = connected ] && [ "$before_endpoint" != "$after_endpoint" ]; then
+    log_msg "FCM guard: proactive heartbeat exposed stale MCS; reconnected ${after_endpoint:-endpoint-unavailable}"
+  elif [ "$after_state" != connected ]; then
+    log_msg "FCM guard: proactive heartbeat left GcmService state=$after_state; normal recovery path will handle it"
+  fi
+  return 0
 }
 
 gcm_reconnect_alarm_pending() {
@@ -391,6 +425,7 @@ now=$(date +%s)
 state=$(fcm_state)
 case "$state" in
   connected)
+    connected_keepalive "$now" || true
     rm -f "$DOWN_FILE" "$ATTEMPT_FILE" "$PATHLOG_FILE" "$DNSLOG_FILE" "$DNSFAIL_FILE" "$SOFT_RECONNECT_FILE" 2>/dev/null || true
     exit 0
     ;;

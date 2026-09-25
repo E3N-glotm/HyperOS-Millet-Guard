@@ -4,7 +4,9 @@ MODDIR=${0%/*}
 echo '=== Millet Guard diagnostics ==='
 /system/bin/sh "$MODDIR/bin/milletctl" status
 echo 'Watchers:'
-for f in /data/adb/millet_guard/inotifyd.pid /data/adb/millet_guard/safety.pid; do
+for f in /data/adb/millet_guard/inotifyd.pid /data/adb/millet_guard/safety.pid \
+         /data/adb/millet_guard/fcm.pid /data/adb/millet_guard/fcm_event.pid \
+         /data/adb/millet_guard/swipe_unstop.pid; do
   [ -f "$f" ] && echo "$(basename "$f"): $(cat "$f")"
 done
 echo 'Recent log:'

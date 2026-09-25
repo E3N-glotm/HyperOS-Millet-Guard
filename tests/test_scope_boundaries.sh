@@ -2,7 +2,8 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-WORKER="$ROOT/module/bin/fcm_event_worker.sh"
+FCM_WORKER="$ROOT/module/bin/fcm_event_worker.sh"
+SWIPE_WORKER="$ROOT/module/bin/swipe_unstop_worker.sh"
 CTL="$ROOT/module/bin/milletctl"
 SERVICE="$ROOT/module/service.sh"
 
@@ -11,20 +12,22 @@ fail() {
   exit 1
 }
 
-[ ! -e "$ROOT/module/bin/swipe_unstop.sh" ] \
-  || fail "SwipeUpClean stopped-state helper must not be shipped"
-[ ! -e "$ROOT/tests/test_swipe_unstop_policy.sh" ] \
-  || fail "obsolete SwipeUpClean regression test must not be shipped"
+[ -f "$SWIPE_WORKER" ] || fail "SwipeUpClean worker is missing"
+grep -q "logcat -b events" "$SWIPE_WORKER" || fail "SwipeUpClean worker must read ActivityManager events"
+grep -q "due to SwipeUpClean" "$SWIPE_WORKER" || fail "SwipeUpClean reason filter is missing"
+grep -q "grep -Fxq.*CONFIG" "$SWIPE_WORKER" || fail "SwipeUpClean worker must be limited to managed packages"
+grep -q 'cmd package unstop --user 0' "$SWIPE_WORKER" || fail "worker must use narrow package unstop"
+if grep -qE 'am start|monkey|setPackageStoppedState|force-stop' "$SWIPE_WORKER"; then
+  fail "SwipeUpClean worker must not relaunch apps, force-stop them, or use hidden binder transactions"
+fi
 
-grep -q "--regex='sourcePkg=com.google.android.gms'" "$WORKER" \
-  || fail "event worker must stay scoped to GMS alarm events"
-grep -q "logcat -b main" "$WORKER" \
-  || fail "event worker must observe the existing Whetstone main-buffer path"
+grep -q "swipe_unstop_worker.sh" "$SERVICE" || fail "service does not launch SwipeUpClean worker"
+grep -q "swipe_unstop.pid" "$SERVICE" || fail "service does not track SwipeUpClean worker"
+grep -q "reconcile.sh.*ctl-apply" "$CTL" || fail "milletctl apply must invoke reconcile.sh"
 
-for file in "$WORKER" "$CTL" "$SERVICE"; do
-  if grep -qE 'SwipeUpClean|swipe_keepalive|swipe_unstop|swipe-add|swipe-remove|swipe-list|swipe-config' "$file"; then
-    fail "package stopped-state manipulation leaked back into $file"
-  fi
-done
+grep -q -- "--regex='sourcePkg=com.google.android.gms'" "$FCM_WORKER" \
+  || fail "FCM event worker must stay scoped to GMS alarm events"
+grep -q "logcat -b main" "$FCM_WORKER" \
+  || fail "FCM event worker must observe the existing Whetstone main-buffer path"
 
 echo "Module scope regression checks passed"

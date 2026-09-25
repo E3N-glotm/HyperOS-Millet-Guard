@@ -23,6 +23,8 @@ Millet Guard does **not** disable Millet/Greeze globally. It maintains a narrow,
 - On the tested Box/TProxy stack, v2.0.3 also self-heals one UID-scoped **FCM-port-only** `BOX_LOCAL` bypass. The GMS UID is resolved dynamically, so a factory reset cannot leave the module targeting an old hard-coded UID.
 - Permission-safe helper execution: v2.0.1 explicitly invokes internal helpers through `/system/bin/sh` and repairs helper execute bits at service startup, so GMS reconciliation still works if a ZIP extractor installs scripts as `0644`.
 - Crash-safe reconciliation lock: v2.0.2 records the lock owner's PID plus `/proc` start time and automatically reaps stale/legacy locks instead of allowing one interrupted reconciliation to disable the guard indefinitely. v2.0.4 makes that validation proc-race-safe and removes the external `tr`/`cmdline` read that could spin a CPU core if the owner vanished mid-read on affected Toybox builds.
+- **v2.1.2 stale-MCS liveness guard:** while GMS reports FCM connected, Millet Guard sends Google's native `MCS_HEARTBEAT` at most once every 15 minutes. This catches sockets that still report `connected=true` after the underlying NAT/mobile path has gone stale; healthy sockets simply answer the heartbeat, while stale sockets are closed and reconnected by GMS itself. No new AlarmManager alarm, wakelock, token rewrite, or routine GMS restart is introduced.
+- **Narrow SwipeUpClean eligibility repair (v2.1.1+):** for packages already in `packages.list`, an exact HyperOS `SwipeUpClean` ActivityManager event can leave Android's package `stopped=true`. On Android 16 the worker uses `cmd package unstop` to clear only that stopped bit. It does not relaunch the app, recreate its task, or react to App-info Force stop / other stop reasons.
 - No database fighting: PowerKeeper may still show `bgControl=miuiAuto`; the module works at the effective Millet/Greeze layer.
 - Clean uninstall semantics.
 
@@ -174,20 +176,19 @@ The validated device additionally exposed a Box network-monitor stale lock and a
 
 ### v2.1.0 scope correction
 
-v2.1.0 removes the experimental package stopped-state manipulation introduced
-in v2.0.8/v2.0.9. Follow-up device forensics showed that the apparent new FCM
-cold-start regression was caused by a previously enabled, dedicated HyperOS FCM
-LSPosed compatibility module disappearing from the device during unrelated
-LSPosed/Zygisk maintenance. After restoring that module, real HIGH-priority FCM
-delivery to process-dead applications recovered without Millet Guard clearing
-their package `stopped` state.
+v2.1.0 removed the earlier v2.0.8/v2.0.9 hidden-Binder stopped-state experiment after follow-up device forensics showed that one cold-start regression had been confounded by a missing dedicated HyperOS FCM compatibility component. That release intentionally returned Millet Guard to its core Millet/Greeze and FCM connection responsibilities.
 
-Millet Guard therefore returns to its original responsibility boundary: Millet/
-Greeze no-restrict ownership, GMS limiter handling, FCM connection/network
-recovery, and the narrow Box/iptables compatibility path. It no longer watches
-`SwipeUpClean`, no longer calls `setPackageStoppedState()`, and does not attempt
-to replace dedicated FCM cold-start compatibility modules. Explicit Android and
-HyperOS package stop/autostart semantics are left untouched.
+Later Android 16 evidence distinguished a separate, narrower case: HyperOS Recents `SwipeUpClean` itself can set a managed package to `stopped=true`. v2.1.1 addresses only that exact event with the package manager's `unstop` command; the old hidden `setPackageStoppedState()` transaction path remains removed.
+
+### v2.1.1 narrow SwipeUpClean repair
+
+v2.1.1 reintroduces a much narrower stopped-state repair after later Android 16 device logs directly showed HyperOS Recents `SwipeUpClean` setting managed packages to `stopped=true`. Unlike the v2.0.8/v2.0.9 experiment, the current implementation does not discover or call a hidden Binder transaction. It listens only for ActivityManager kill events whose reason is exactly `SwipeUpClean`, requires the package to already be present in `packages.list`, verifies that the package is actually stopped, then uses Android 16's package-manager `unstop` command. The application process remains dead; the change only restores eligibility for FCM/other system wakeups. Explicit App-info Force stop and unrelated kill reasons are not undone.
+
+### v2.1.2 connected-but-stale MCS heartbeat
+
+v2.1.2 fixes a failure mode that the earlier guard could not detect: `GcmService` can continue to report `Is client connected: true` after the underlying MCS TCP connection has already become stale behind a mobile/NAT path. On the validated device, GMS heartbeat alarms were delayed by roughly 289-293 seconds, and manually sending Google's native `com.google.android.intent.action.MCS_HEARTBEAT` immediately produced `Close err:28`, followed by an automatic GMS reconnect and delivery of queued WeChat FCM messages.
+
+While GMS reports connected, Millet Guard now rate-limits that same native heartbeat action to at most once every 900 seconds. A healthy connection only sends a tiny MCS heartbeat. A stale connection is exposed immediately and GMS performs its own reconnect; Millet Guard does not kill Play services for this path. The existing two-minute userspace worker and GMS-alarm event worker provide opportunities to run the check, but complete deep suspend can still defer userspace execution. The change does not rewrite FCM tokens and does not create a new Android AlarmManager timer or wakelock.
 
 ## Factory reset / clean-device setup
 
@@ -206,7 +207,7 @@ The exact Box/sing-box snippets and verification commands are documented in [doc
 
 ## Battery impact
 
-The Millet reconciliation path is event-driven and normally sleeping, with a five-minute safety check. v2.0.3 adds one sleeping two-minute FCM userspace fallback and one filtered `logcat` observer for existing GMS alarm deliveries. Neither creates an Android AlarmManager timer or acquires a wakelock. v2.0.4 also removes the procfs/Toybox lock-validation path that was observed to spin a CPU core after a narrow process-exit race. v2.0.5 serializes concurrent FCM checks and only starts resolver diagnostics after a sustained disconnect. In the healthy state the guard reads GCM service state, verifies/self-heals the narrow Box exception only if genuinely missing, and exits. A GMS process restart is strictly last-resort: Android resolver health, real TCP FCM reachability, absence of recent `UNKNOWN_HOST`, and resolver-stability grace must all pass first.
+The Millet reconciliation path is event-driven and normally sleeping, with a five-minute safety check. v2.0.3 adds one sleeping two-minute FCM userspace fallback and one filtered `logcat` observer for existing GMS alarm deliveries. Neither creates an Android AlarmManager timer or acquires a wakelock. v2.1.2 reuses those existing check opportunities to send at most one native MCS heartbeat every 15 minutes while GMS reports connected; it does not add an Android alarm or wakelock. v2.0.4 also removes the procfs/Toybox lock-validation path that was observed to spin a CPU core after a narrow process-exit race. v2.0.5 serializes concurrent FCM checks and only starts resolver diagnostics after a sustained disconnect. A GMS process restart remains strictly last-resort: Android resolver health, real TCP FCM reachability, absence of recent `UNKNOWN_HOST`, and resolver-stability grace must all pass first.
 
 **Important:** exempting an application from Millet/Greeze can increase that application's background activity and battery use. This is expected. Add only apps that genuinely need unrestricted background execution.
 

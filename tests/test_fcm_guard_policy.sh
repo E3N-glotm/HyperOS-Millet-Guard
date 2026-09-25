@@ -25,6 +25,14 @@ grep -q 'installed missing Box FCM-only bypass' "$GUARD" \
   || fail "FCM bypass self-heal is missing"
 grep -q 'box_manages_fcm_bypass' "$GUARD" \
   || fail "native Box rule ownership is not detected"
+grep -q 'connected_keepalive' "$GUARD" \
+  || fail "connected-but-stale MCS liveness probe is missing"
+grep -q 'KEEPALIVE_INTERVAL=900' "$GUARD" \
+  || fail "MCS proactive heartbeat interval must remain 15 minutes"
+grep -q 'com.google.android.intent.action.MCS_HEARTBEAT' "$GUARD" \
+  || fail "native MCS heartbeat action is missing"
+grep -q 'connected_keepalive "$now"' "$GUARD" \
+  || fail "healthy-state branch does not invoke the proactive MCS heartbeat"
 grep -q 'soft_reconnect_if_stalled' "$GUARD" \
   || fail "lost GMS reconnect-alarm recovery is missing"
 grep -q 'com.google.android.intent.action.GCM_RECONNECT' "$GUARD" \
@@ -40,6 +48,11 @@ grep -q 'ip=$(android_resolve_mtalk' "$GUARD" \
 if grep -q '61[.]139[.]2[.]69' "$GUARD"; then
   fail "carrier-specific FCM DNS must not be hard-coded in the guard"
 fi
+
+heartbeat_line=$(grep -n 'connected_keepalive "$now"' "$GUARD" | head -n1 | cut -d: -f1)
+[ -n "$heartbeat_line" ] || fail "cannot locate connected keepalive call"
+sed -n "${heartbeat_line},$((heartbeat_line+4))p" "$GUARD" | grep -q 'exit 0' \
+  || fail "connected keepalive must execute immediately before the healthy-state exit"
 
 unknown_line=$(grep -n 'GMS reported UNKNOWN_HOST' "$GUARD" | head -n1 | cut -d: -f1)
 resolver_line=$(grep -n 'Android resolver cannot resolve mtalk.google.com' "$GUARD" | head -n1 | cut -d: -f1)

@@ -19,6 +19,7 @@ files=(
   bin/lib.sh
   bin/milletctl
   bin/reconcile.sh
+  bin/swipe_unstop_worker.sh
 )
 
 for file in "${files[@]}"; do

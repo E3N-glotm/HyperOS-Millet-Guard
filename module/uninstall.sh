@@ -2,7 +2,7 @@
 MODDIR=${0%/*}
 RUNDIR=/data/adb/millet_guard
 # Stop module-owned workers.
-for f in inotifyd.pid safety.pid; do
+for f in inotifyd.pid safety.pid fcm.pid fcm_event.pid swipe_unstop.pid; do
   if [ -f "$RUNDIR/$f" ]; then
     pid=$(cat "$RUNDIR/$f" 2>/dev/null)
     [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
@@ -25,5 +25,7 @@ if [ -f "$OWNED" ]; then
 fi
 # Keep packages.list by default so reinstalling preserves user choices.
 # Users who want a full purge can remove /data/adb/millet_guard manually.
-rm -f "$RUNDIR/inotifyd.pid" "$RUNDIR/safety.pid" "$RUNDIR/managed.last" \
-      "$RUNDIR/system_server.pid" "$RUNDIR/limiter_check.epoch" 2>/dev/null
+rm -f "$RUNDIR/inotifyd.pid" "$RUNDIR/safety.pid" "$RUNDIR/fcm.pid" \
+      "$RUNDIR/fcm_event.pid" "$RUNDIR/swipe_unstop.pid" "$RUNDIR/managed.last" \
+      "$RUNDIR/system_server.pid" "$RUNDIR/limiter_check.epoch" \
+      "$RUNDIR/fcm_keepalive.epoch" 2>/dev/null
