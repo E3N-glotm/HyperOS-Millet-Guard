@@ -190,6 +190,12 @@ v2.1.2 fixes a failure mode that the earlier guard could not detect: `GcmService
 
 While GMS reports connected, Millet Guard now rate-limits that same native heartbeat action to at most once every 900 seconds. A healthy connection only sends a tiny MCS heartbeat. A stale connection is exposed immediately and GMS performs its own reconnect; Millet Guard does not kill Play services for this path. The existing two-minute userspace worker and GMS-alarm event worker provide opportunities to run the check, but complete deep suspend can still defer userspace execution. The change does not rewrite FCM tokens and does not create a new Android AlarmManager timer or wakelock.
 
+### v2.1.3 heartbeat-transition recovery
+
+v2.1.3 fixes a recovery gap found during a 2026-09-29 four-hour FCM outage. The proactive native MCS heartbeat in v2.1.2 correctly detected the stale connection and changed `GcmService` to disconnected, but the surrounding healthy-state branch still cleared outage metadata and exited. The guard now re-reads `GcmService` immediately after the heartbeat and enters the normal recovery path whenever the probe exposes a disconnect.
+
+The hard-recovery fallback also no longer assumes that `GcmService` must live in `com.google.android.gms.persistent`. On newer GMS builds where the service is hosted by the main `com.google.android.gms` process, Millet Guard selects that process only when the historical persistent process is absent. DNS, TCP-path, reconnect-scheduler, and rate-limit gates still run before any last-resort process restart.
+
 ## Factory reset / clean-device setup
 
 A factory reset removes Magisk modules and can assign Google Play services a different Android app UID. Do **not** restore a rule hard-coded to a previous UID such as `10139`.
