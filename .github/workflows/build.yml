@@ -1,4 +1,6 @@
 name: Build Magisk module
+permissions:
+  contents: write
 on:
   push:
   pull_request:
@@ -34,3 +36,22 @@ jobs:
         with:
           name: MilletGuard
           path: dist/*.zip
+
+      - name: Publish tagged release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'Release ')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(awk -F= '$1=="version" {print $2}' module/module.prop)
+          TAG="v${VERSION}"
+          ZIP="dist/MilletGuard-v${VERSION}.zip"
+          NOTES="release-notes/${TAG}.md"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "${TAG}"
+          git push origin "${TAG}"
+          if [ -f "${NOTES}" ]; then
+            gh release create "${TAG}" "${ZIP}" --title "Millet Guard ${TAG}" --notes-file "${NOTES}"
+          else
+            gh release create "${TAG}" "${ZIP}" --title "Millet Guard ${TAG}" --generate-notes
+          fi
