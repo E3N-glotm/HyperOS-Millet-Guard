@@ -80,3 +80,12 @@ v2.1.0 撤销 v2.0.8/v2.0.9 引入的实验性 package `stopped` 状态干预。
 加入 no-restrict 的应用可能增加后台运行和耗电。只添加确实需要可靠后台执行的应用。
 
 该机制与 Android 原生 DeviceIdle/Doze 白名单不是一回事。
+
+## v2.1.3 心跳转断线恢复修复
+
+v2.1.3 修复了 2026-09-29 实机出现的一次约 4 小时 FCM 断联。v2.1.2 的主动 MCS 心跳实际上已经成功识别到 stale/half-open 连接，并把 `GcmService` 状态变为 disconnected，但外层 connected 分支随后仍会清理 outage 状态并直接退出，因此恢复流程没有接住这次状态切换。
+
+新版本会在主动心跳后立即重新读取一次 `GcmService`；如果心跳把连接暴露为 disconnected，就直接进入既有恢复流程，而不是按原来的 connected 状态清理故障记录。
+
+同时，硬恢复不再假定 `GcmService` 一定运行在 `com.google.android.gms.persistent`。对于新版 Google Play 服务，如果 persistent 进程不存在，会兼容回退到实际承载 GCM 的 `com.google.android.gms` 主进程。DNS、mtalk TCP 可达性、重连调度器与限频保护仍然保持在任何最后兜底进程重启之前。
+
