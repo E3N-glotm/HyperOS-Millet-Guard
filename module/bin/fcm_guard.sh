@@ -426,8 +426,17 @@ state=$(fcm_state)
 case "$state" in
   connected)
     connected_keepalive "$now" || true
-    rm -f "$DOWN_FILE" "$ATTEMPT_FILE" "$PATHLOG_FILE" "$DNSLOG_FILE" "$DNSFAIL_FILE" "$SOFT_RECONNECT_FILE" 2>/dev/null || true
-    exit 0
+
+    # The heartbeat probe itself can expose a half-open MCS session. Re-read
+    # GcmService before clearing outage metadata; otherwise the disconnect
+    # discovered by the heartbeat is immediately forgotten until a later pass.
+    state=$(fcm_state)
+    if [ "$state" = connected ]; then
+      rm -f "$DOWN_FILE" "$ATTEMPT_FILE" "$PATHLOG_FILE" "$DNSLOG_FILE" "$DNSFAIL_FILE" "$SOFT_RECONNECT_FILE" 2>/dev/null || true
+      exit 0
+    fi
+    [ "$state" = unknown ] && exit 0
+    log_msg "FCM guard: keepalive exposed disconnected MCS; entering recovery path"
     ;;
   unknown)
     # Fail closed: diagnostics failure must never trigger process intervention.
@@ -435,9 +444,11 @@ case "$state" in
     ;;
 esac
 
-# Explicitly disconnected from GCM/FCM from here on. Keep this scoped to the
-# tested Box/sing-box stack rather than becoming a generic network watchdog.
+# Explicitly disconnected from GCM/FCM from here on. On newer GMS builds the
+# GcmService host can be com.google.android.gms instead of the historical
+# com.google.android.gms.persistent process.
 gpid=$(pidof com.google.android.gms.persistent 2>/dev/null | awk '{print $1}')
+[ -n "$gpid" ] || gpid=$(pidof com.google.android.gms 2>/dev/null | awk '{print $1}')
 spid=$(pidof sing-box 2>/dev/null | awk '{print $1}')
 [ -n "$gpid" ] && [ -n "$spid" ] || exit 0
 
@@ -530,7 +541,7 @@ ip=${rest%% *}
 port=${rest##* }
 android_ip=$(android_resolve_mtalk 2>/dev/null || true)
 [ -n "$android_ip" ] || exit 0
-log_msg "FCM guard: outage=${outage}s fcm_path=ok resolver=$resolver endpoint=$ip:$port android_resolver=$android_ip; restarting gms.persistent pid=$gpid attempt=$((attempts+1))"
+log_msg "FCM guard: outage=${outage}s fcm_path=ok resolver=$resolver endpoint=$ip:$port android_resolver=$android_ip; restarting GMS-host pid=$gpid attempt=$((attempts+1))"
 echo "$now" > "$LAST_FILE"
 echo $((attempts+1)) > "$ATTEMPT_FILE"
 kill -TERM "$gpid" 2>/dev/null || exit 0
@@ -540,6 +551,7 @@ state2=$(fcm_state)
 if [ "$state2" = "connected" ]; then
   rm -f "$DOWN_FILE" "$ATTEMPT_FILE" "$PATHLOG_FILE" "$DNSLOG_FILE" "$DNSFAIL_FILE" "$SOFT_RECONNECT_FILE" 2>/dev/null || true
   newpid=$(pidof com.google.android.gms.persistent 2>/dev/null | awk '{print $1}')
+  [ -n "$newpid" ] || newpid=$(pidof com.google.android.gms 2>/dev/null | awk '{print $1}')
   endpoint=$(run_timeout dumpsys activity service com.google.android.gms/.gcm.GcmService 2>/dev/null \
     | grep -m1 'connected=' | sed 's/^[[:space:]]*//' || true)
   log_msg "FCM guard: recovered newpid=${newpid:-unknown} ${endpoint:-endpoint-unavailable}"
