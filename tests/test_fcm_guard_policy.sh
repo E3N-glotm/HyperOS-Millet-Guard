@@ -33,6 +33,12 @@ grep -q 'com.google.android.intent.action.MCS_HEARTBEAT' "$GUARD" \
   || fail "native MCS heartbeat action is missing"
 grep -q 'connected_keepalive "$now"' "$GUARD" \
   || fail "healthy-state branch does not invoke the proactive MCS heartbeat"
+grep -q 'state=$(fcm_state)' "$GUARD" \
+  || fail "heartbeat result is not re-read before clearing outage state"
+grep -q 'keepalive exposed disconnected MCS; entering recovery path' "$GUARD" \
+  || fail "heartbeat-discovered disconnect does not enter recovery"
+grep -q 'pidof com.google.android.gms 2>/dev/null' "$GUARD" \
+  || fail "modern GMS main-process fallback is missing"
 grep -q 'soft_reconnect_if_stalled' "$GUARD" \
   || fail "lost GMS reconnect-alarm recovery is missing"
 grep -q 'com.google.android.intent.action.GCM_RECONNECT' "$GUARD" \
@@ -51,8 +57,10 @@ fi
 
 heartbeat_line=$(grep -n 'connected_keepalive "$now"' "$GUARD" | head -n1 | cut -d: -f1)
 [ -n "$heartbeat_line" ] || fail "cannot locate connected keepalive call"
-sed -n "${heartbeat_line},$((heartbeat_line+4))p" "$GUARD" | grep -q 'exit 0' \
-  || fail "connected keepalive must execute immediately before the healthy-state exit"
+sed -n "${heartbeat_line},$((heartbeat_line+12))p" "$GUARD" | grep -q 'state=$(fcm_state)' \
+  || fail "heartbeat probe must be followed by a fresh GcmService state read"
+sed -n "${heartbeat_line},$((heartbeat_line+12))p" "$GUARD" | grep -q 'exit 0' \
+  || fail "healthy state must still exit without entering recovery"
 
 unknown_line=$(grep -n 'GMS reported UNKNOWN_HOST' "$GUARD" | head -n1 | cut -d: -f1)
 resolver_line=$(grep -n 'Android resolver cannot resolve mtalk.google.com' "$GUARD" | head -n1 | cut -d: -f1)
