@@ -251,5 +251,5 @@ For rooted devices using Millet Guard, the repository also provides a small comp
 
 It shows only a SHA-256 fingerprint of the token, verifies GMS/MCS connectivity and WeChat push state, and cleans only refresh-specific temporary residue.
 
-Latest APK: [WeChat FCM Refresh v1.0.0](https://github.com/E3N-glotm/HyperOS-Millet-Guard/releases/tag/wechat-fcm-refresh-v1.0.0)
+Latest APK: [WeChat FCM Refresh v1.0.1](https://github.com/E3N-glotm/HyperOS-Millet-Guard/releases/tag/wechat-fcm-refresh-v1.0.1)
 
