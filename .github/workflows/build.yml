@@ -19,6 +19,8 @@ jobs:
           sh -n extras/box-for-root/net.inotify
           sh -n tests/test_box_net_inotify_policy.sh
           bash -n tests/test_release_line_endings.sh
+          bash -n build-companion.sh
+          sh -n companion-app/unpack-sources.sh
       - name: Reconcile lock regression
         run: sh tests/test_reconcile_lock.sh
       - name: FCM DNS recovery regression
@@ -32,10 +34,21 @@ jobs:
           ./build.sh
           VERSION=$(awk -F= '$1=="version" {print $2}' module/module.prop)
           bash tests/test_release_line_endings.sh "dist/MilletGuard-v${VERSION}.zip"
+      - name: Build companion app
+        run: bash ./build-companion.sh
+
       - uses: actions/upload-artifact@v4
         with:
           name: MilletGuard
-          path: dist/*.zip
+          path: dist/MilletGuard-v*.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WeChat-FCM-Refresh
+          path: |
+            dist/WeChat-FCM-Refresh-v*.apk
+            dist/WeChat-FCM-Refresh-v*.apk.sha256
+
 
       - name: Publish tagged release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'Release ')
@@ -55,3 +68,18 @@ jobs:
           else
             gh release create "${TAG}" "${ZIP}" --title "Millet Guard ${TAG}" --generate-notes
           fi
+
+      - name: Publish companion app release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'FCM App Release ')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(awk -F"'" '/versionName/ {print $2}' companion-app/app/build.gradle)
+          TAG="wechat-fcm-refresh-v${VERSION}"
+          APK="dist/WeChat-FCM-Refresh-v${VERSION}.apk"
+          SHA="${APK}.sha256"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "${TAG}"
+          git push origin "${TAG}"
+          gh release create "${TAG}" "${APK}" "${SHA}" --title "WeChat FCM Refresh v${VERSION}" --notes "Root companion utility for rotating WeChat Firebase IID/FCM registration without clearing WeChat account or chat data. The app displays only a SHA-256 token fingerprint, not the token plaintext."
