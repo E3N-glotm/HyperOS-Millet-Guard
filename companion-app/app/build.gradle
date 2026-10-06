@@ -1,0 +1,30 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.e3n.wechatfcmrefresh'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'com.e3n.wechatfcmrefresh'
+        minSdk 29
+        targetSdk 35
+        versionCode 1
+        versionName '1.0.0'
+    }
+    signingConfigs {
+        release {
+            storeFile file('../ci/wechat-fcm-refresh.jks')
+            storePassword 'E3N-fcm-refresh-2026'
+            keyAlias 'wechatfcm'
+            keyPassword 'E3N-fcm-refresh-2026'
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            signingConfig signingConfigs.release
+        }
+    }
+}
