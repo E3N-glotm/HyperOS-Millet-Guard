@@ -22,3 +22,7 @@ find "$STAGE" -type f -exec sed -i 's/\r$//' {} +
   zip -qr "$ZIP" . -x '*.DS_Store'
 )
 echo "$ZIP"
+
+if [ -f "$ROOT/build-companion.sh" ]; then
+  bash "$ROOT/build-companion.sh"
+fi
