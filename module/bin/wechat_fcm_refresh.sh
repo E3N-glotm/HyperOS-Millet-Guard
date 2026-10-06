@@ -32,10 +32,10 @@ status() {
   echo "wechat_version=$version"
   push_pid=$(pidof com.tencent.mm:push 2>/dev/null | awk '{print $1}')
   echo "push_pid=$push_pid"
-  if dumpsys activity services com.tencent.mm 2>/dev/null | grep -q 'FCMInstanceIDListenerService'; then
-    echo "fcm_listener=active"
+  if cmd package query-services --brief -a com.google.firebase.INSTANCE_ID_EVENT com.tencent.mm 2>/dev/null | grep -q 'FCMInstanceIDListenerService'; then
+    echo "fcm_listener=registered"
   else
-    echo "fcm_listener=inactive"
+    echo "fcm_listener=missing"
   fi
   dumpsys activity service com.google.android.gms/.gcm.GcmService 2>/dev/null |
     grep -E 'connected=|Is client connected:|Reconnect Scheduler Alarm:' | head -n 3 |
