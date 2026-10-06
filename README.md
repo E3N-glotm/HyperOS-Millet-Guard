@@ -243,3 +243,13 @@ This project relies on reverse-engineered Xiaomi implementation details. `MILLET
 ## License
 
 MIT
+
+
+## WeChat FCM Refresh companion app
+
+For rooted devices using Millet Guard, the repository also provides a small companion APK that can rotate WeChat's Firebase Instance ID / FCM registration without clearing WeChat account or chat data.
+
+It shows only a SHA-256 fingerprint of the token, verifies GMS/MCS connectivity and WeChat push state, and cleans only refresh-specific temporary residue.
+
+Latest APK: [WeChat FCM Refresh v1.0.0](https://github.com/E3N-glotm/HyperOS-Millet-Guard/releases/tag/wechat-fcm-refresh-v1.0.0)
+
