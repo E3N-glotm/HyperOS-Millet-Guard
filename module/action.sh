@@ -3,6 +3,7 @@ MODDIR=${0%/*}
 /system/bin/sh "$MODDIR/bin/reconcile.sh" action
 echo '=== Millet Guard diagnostics ==='
 /system/bin/sh "$MODDIR/bin/milletctl" status
+/system/bin/sh "$MODDIR/bin/capability_report.sh" 2>/dev/null || true
 echo 'Watchers:'
 for f in /data/adb/millet_guard/inotifyd.pid /data/adb/millet_guard/safety.pid \
          /data/adb/millet_guard/fcm.pid /data/adb/millet_guard/fcm_event.pid \
