@@ -3,5 +3,5 @@ name=Millet Guard
 version=2.1.4
 versionCode=214
 author=E3N
-summary=Configurable HyperOS Millet/Greeze no-restrict guard
-description=Cross-ROM interface-audited, ROM-version-independent guard with read-only capability diagnostics. Keeps user-selected apps in MILLET_NO_RESTRICT_APP. Includes Xiaomi GMS limiter handling, DNS-aware recovery, stale-MCS proactive heartbeat, heartbeat-transition recovery, reconnect self-healing, and narrow SwipeUpClean stopped-state repair.
+summary=HyperOS 应用后台免冻结与 FCM 自愈
+description=按应用管理 HyperOS Millet/Greeze 免冻结名单，支持 Google FCM 分层自愈、网络与心跳诊断；不按固定系统版本判断接口。
