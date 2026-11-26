@@ -85,4 +85,45 @@ status=16777984
 err=$(( (status / 256) % 256 ))
 [ "$err" -eq 3 ] || fail "gtalk_connection UNKNOWN_HOST decoder regression"
 
+# A resolver query under the root UID is not equivalent to GMS on
+# TProxy/UID-routing systems. Require the real package UID on both probes.
+grep -q 'gms_uid_for_probe()' "$GUARD" \
+  || fail "GMS package UID probe missing"
+grep -q 'run_timeout su -s /system/bin/sh "$uid" -c' "$GUARD" \
+  || fail "FCM DNS probe must execute under the GMS UID"
+grep -q 'gms_uid_tcp_ready "$ip" "$port"' "$GUARD" \
+  || fail "MCS TCP probe must use the GMS UID"
+grep -Fq 'PING[[:space:]]+[^[:space:]]+' "$GUARD" \
+  || fail "DNS resolver parser must accept a CNAME result"
+grep -q 'scheduled-alarm-stalled-native-reconnect' "$GUARD" \
+  || fail "deferrable scheduled alarm must have bounded soft recovery"
+grep -q 'dns-unavailable' "$GUARD" \
+  || fail "persistent DNS failure must limit repeated reconnect broadcasts"
+grep -q 'soft reconnect unverified state=' "$GUARD" \
+  || fail "unverified GCM status must retain outage accounting"
+grep -q 'soft reconnect verified' "$GUARD" \
+  || fail "MCS endpoint verification is absent"
+if grep -q '\[ -n "$gpid" \] && \[ -n "$spid" \]' "$GUARD"; then
+  fail "FCM guard must not depend on the optional Box/sing-box daemon"
+fi
+
+# Android ping outputs a canonical alias on GMS's actual UID: this was
+# reproduced on the target handset (root ping had a different A record).
+for line in \
+  'PING mtalk.google.com (64.233.189.188) 56(84) bytes of data.' \
+  'PING mobile-gtalk.l.google.com (173.194.43.188) 56(84) bytes of data.'; do
+  ip=$(printf '%s\n' "$line" | awk '
+    /^PING[[:space:]]+[^[:space:]]+[[:space:]]/ {
+      if (match($0, /\([0-9][0-9.]*\)/)) {
+        value=substr($0,RSTART+1,RLENGTH-2)
+        if (split(value, octets, ".")==4) {
+          good=1
+          for (i=1;i<=4;i++) if (octets[i] !~ /^[0-9]+$/ || octets[i]>255) good=0
+          if (good) {print value;exit}
+        }
+      }
+    }')
+  [ -n "$ip" ] || fail "DNS parser rejected canonical alias: $line"
+done
+
 echo "FCM guard policy regression checks passed"
