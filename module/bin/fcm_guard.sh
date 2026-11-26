@@ -230,8 +230,16 @@ soft_reconnect_if_stalled() {
   [ "$soft_outage" -ge 120 ] 2>/dev/null || return 1
 
   scheduler_state=$(gcm_reconnect_scheduler_state)
+  soft_gap=180
   case "$scheduler_state" in
     overdue) soft_reason=overdue-scheduler ;;
+    scheduled)
+      # A scheduled reconnect alarm can remain deferred in deep mobile idle.
+      # A low-impact broadcast is safer than waiting hours for a stale alarm.
+      [ "$soft_outage" -ge 120 ] 2>/dev/null || return 1
+      soft_reason=scheduled-alarm-stalled-native-reconnect
+      soft_gap=300
+      ;;
     missing)
       # Avoid racing the short window between one reconnect attempt and GMS
       # registering its next alarm. A completely missing scheduler is only
@@ -242,9 +250,15 @@ soft_reconnect_if_stalled() {
     *) return 1 ;;
   esac
 
+  # Repeating GCM_RECONNECT cannot repair native DNS; reduce wakeups after
+  # 15 minutes of confirmed DNS failure while preserving early recovery.
+  if [ "${3:-}" = dns-failed ] && [ "$soft_outage" -ge 900 ] 2>/dev/null; then
+    soft_gap=1800
+    soft_reason="$soft_reason-dns-unavailable"
+  fi
   soft_last=$(cat "$SOFT_RECONNECT_FILE" 2>/dev/null)
   case "$soft_last" in ''|*[!0-9]*) soft_last=0;; esac
-  [ $((soft_now-soft_last)) -ge 300 ] 2>/dev/null || return 1
+  [ $((soft_now-soft_last)) -ge "$soft_gap" ] 2>/dev/null || return 1
   printf '%s\n' "$soft_now" > "$SOFT_RECONNECT_FILE"
 
   # This is the same reconnect event GMS normally receives from its own
@@ -260,27 +274,45 @@ soft_reconnect_if_stalled() {
   fi
   sleep 8
 
-  if [ "$(fcm_state)" = "connected" ]; then
-    endpoint=$(run_timeout dumpsys activity service com.google.android.gms/.gcm.GcmService 2>/dev/null \
-      | grep -m1 'connected=' | sed 's/^[[:space:]]*//' || true)
-    log_msg "FCM guard: soft reconnect recovered ${endpoint:-endpoint-unavailable}"
+  # A connected flag without a concrete MCS endpoint was logged as a
+  # successful recovery on 2026-11-26; retain the outage timer in that case.
+  soft_state=$(fcm_state)
+  endpoint=$(run_timeout dumpsys activity service com.google.android.gms/.gcm.GcmService 2>/dev/null \
+    | grep -m1 'connected=' | sed 's/^[[:space:]]*//' || true)
+  if [ "$soft_state" = connected ] \
+      && printf '%s\n' "$endpoint" | grep -Eq 'connected=[^[:space:]]+.*port=(5228|5229|5230)'; then
+    log_msg "FCM guard: soft reconnect verified $endpoint"
     rm -f "$DOWN_FILE" "$ATTEMPT_FILE" "$PATHLOG_FILE" "$DNSLOG_FILE" "$DNSFAIL_FILE" "$SOFT_RECONNECT_FILE" 2>/dev/null || true
     return 0
   fi
 
-  log_msg "FCM guard: soft reconnect delivered but GcmService remains disconnected"
+  log_msg "FCM guard: soft reconnect unverified state=$soft_state ${endpoint:-endpoint-unavailable}; outage retained"
   return 1
 }
 
+gms_uid_for_probe() {
+  uid=$(pm list packages -U com.google.android.gms 2>/dev/null \
+    | awk '$1 == "package:com.google.android.gms" { sub(/^uid:/, "", $2); print $2; exit }')
+  case "$uid" in ''|*[!0-9]*) return 1;; esac
+  printf '%s\n' "$uid"
+}
+
+gms_uid_tcp_ready() {
+  probe_ip=$1; probe_port=$2
+  probe_uid=$(gms_uid_for_probe) || return 1
+  command -v su >/dev/null 2>&1 || return 1
+  "$BB" timeout 7 su -s /system/bin/sh "$probe_uid" -c \
+    "/system/bin/toybox nc -z -w 4 $probe_ip $probe_port >/dev/null 2>&1"
+}
+
 fcm_path_ready() {
-  # Use the same Android resolver path as GMS. A direct nslookup from the
-  # module shell is not an independent probe on TProxy systems because Box may
-  # hijack it back through the same sing-box DNS policy.
+  # Probe direct MCS reachability as GMS, not as root through a different
+  # Box/TProxy UID policy. Failure never justifies terminating GMS.
   ip=$(android_resolve_mtalk 2>/dev/null || true)
   [ -n "$ip" ] || return 1
   for port in 5228 5229 5230; do
-    if "$BB" timeout 6 "$BB" nc -z -w 4 "$ip" "$port" >/dev/null 2>&1; then
-      printf '%s %s %s\n' android "$ip" "$port"
+    if gms_uid_tcp_ready "$ip" "$port"; then
+      printf '%s %s %s\n' gms-uid "$ip" "$port"
       return 0
     fi
   done
@@ -288,15 +320,23 @@ fcm_path_ready() {
 }
 
 android_resolve_mtalk() {
-  # Deliberately use Android's libc/netd resolver path instead of direct
-  # nslookup. The latter can succeed against a configured upstream while GMS
-  # itself is still receiving UNKNOWN_HOST through Android's resolver chain.
-  out=$(run_timeout /system/bin/ping -c 1 -W 1 mtalk.google.com 2>&1 || true)
+  # Root and GMS can resolve different endpoints under Box. Run the probe
+  # under the installed GMS UID, without a ping-generated APK or test file.
+  uid=$(gms_uid_for_probe) || return 1
+  command -v su >/dev/null 2>&1 || return 1
+  out=$(run_timeout su -s /system/bin/sh "$uid" -c \
+    '/system/bin/ping -c 1 -W 1 mtalk.google.com' 2>&1 || true)
+  # Android ping can print the canonical alias mobile-gtalk.l.google.com
+  # instead of mtalk.google.com. Both are valid names for this A record.
   ip=$(printf '%s\n' "$out" | awk '
-    /PING[[:space:]]+mtalk[.]google[.]com/ {
+    /^PING[[:space:]]+[^[:space:]]+[[:space:]]/ {
       if (match($0, /\([0-9][0-9.]*\)/)) {
-        value=substr($0, RSTART+1, RLENGTH-2)
-        if (split(value, octets, ".") == 4) { print value; exit }
+        value=substr($0,RSTART+1,RLENGTH-2)
+        if (split(value, octets, ".")==4) {
+          good=1
+          for (i=1;i<=4;i++) if (octets[i] !~ /^[0-9]+$/ || octets[i]>255) good=0
+          if (good) {print value;exit}
+        }
       }
     }
   ')
@@ -449,8 +489,8 @@ esac
 # com.google.android.gms.persistent process.
 gpid=$(pidof com.google.android.gms.persistent 2>/dev/null | awk '{print $1}')
 [ -n "$gpid" ] || gpid=$(pidof com.google.android.gms 2>/dev/null | awk '{print $1}')
-spid=$(pidof sing-box 2>/dev/null | awk '{print $1}')
-[ -n "$gpid" ] && [ -n "$spid" ] || exit 0
+[ -n "$gpid" ] || exit 0
+# Box/sing-box is optional; the FCM guard must operate without a proxy.
 
 if [ ! -f "$DOWN_FILE" ]; then
   echo "$now" > "$DOWN_FILE"
@@ -474,7 +514,7 @@ if [ "$outage" -ge 60 ] 2>/dev/null; then
       remember_dns_failure "$unknown_epoch"
       flush_android_dns "$now"
       rate_limited_dns_log "$now" "GMS reported UNKNOWN_HOST ${unknown_age}s ago; DNS remediation only, no GMS restart"
-      soft_reconnect_if_stalled "$now" "$outage" || true
+      soft_reconnect_if_stalled "$now" "$outage" dns-failed || true
       exit 0
     fi
   fi
@@ -484,7 +524,7 @@ if [ "$outage" -ge 60 ] 2>/dev/null; then
     remember_dns_failure "$now"
     flush_android_dns "$now"
     rate_limited_dns_log "$now" "Android resolver cannot resolve mtalk.google.com; DNS remediation only, no GMS restart"
-    soft_reconnect_if_stalled "$now" "$outage" || true
+    soft_reconnect_if_stalled "$now" "$outage" dns-failed || true
     exit 0
   fi
 
