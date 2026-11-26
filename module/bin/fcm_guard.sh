@@ -224,6 +224,46 @@ gcm_reconnect_scheduler_state() {
   fi
 }
 
+# A transient GcmService connected flag is not proof of a usable TCP
+# session. Compare the reported MCS host/IP/port with exactly one established
+# kernel socket owned by the installed Google Play services UID.
+fcm_mcs_socket_ready() {
+  ep=$1
+  case "$ep" in
+    connected=mtalk.google.com/*,port=*|connected=alt[0-9]*-mtalk.google.com/*,port=*) ;;
+    *) return 1 ;;
+  esac
+  peer=${ep#*/}
+  peer=${peer%,port=*}
+  peer=${peer#\[}; peer=${peer%\]}
+  peer=${peer#::ffff:}
+  port=${ep##*,port=}
+  case "$peer" in ''|*[!0-9a-fA-F:.]*) return 1;; esac
+  case "$port" in 5228|5229|5230) ;; *) return 1;; esac
+  command -v ss >/dev/null 2>&1 || return 1
+  uid=$(gms_uid_for_probe 2>/dev/null) || return 1
+  matched=$(run_timeout ss -Htnpe state established "( dport = :$port )" 2>/dev/null |
+    awk -v expected="$peer" -v expected_port="$port" -v expected_uid="$uid" '
+      {
+        address=$4; actual_port=address
+        sub(/^.*:/,"",actual_port)
+        sub(/:[^:]*$/,"",address)
+        sub(/^\[/,"",address); sub(/\]$/,"",address)
+        sub(/^::ffff:/,"",address)
+        if (address!=expected || actual_port!=expected_port) next
+        sock_uid=""; inode=""; pid=""
+        for (i=5;i<=NF;i++) {
+          if ($i ~ /^uid:[0-9]+$/) {sock_uid=$i;sub(/^uid:/,"",sock_uid)}
+          if ($i ~ /^ino:[0-9]+$/) {inode=$i;sub(/^ino:/,"",inode)}
+        }
+        if (match($0,/pid=[0-9]+,fd=[0-9]+/)) pid=substr($0,RSTART,RLENGTH)
+        if (sock_uid==expected_uid && inode!="" && pid!="") count++
+      }
+      END {if (count==1) print "verified"}
+    ')
+  [ "$matched" = verified ]
+}
+
 soft_reconnect_if_stalled() {
   soft_now=$1
   soft_outage=$2
@@ -280,8 +320,8 @@ soft_reconnect_if_stalled() {
   endpoint=$(run_timeout dumpsys activity service com.google.android.gms/.gcm.GcmService 2>/dev/null \
     | grep -m1 'connected=' | sed 's/^[[:space:]]*//' || true)
   if [ "$soft_state" = connected ] \
-      && printf '%s\n' "$endpoint" | grep -Eq 'connected=[^[:space:]]+.*port=(5228|5229|5230)'; then
-    log_msg "FCM guard: soft reconnect verified $endpoint"
+      && fcm_mcs_socket_ready "$endpoint"; then
+    log_msg "FCM guard: soft reconnect MCS socket verified $endpoint"
     rm -f "$DOWN_FILE" "$ATTEMPT_FILE" "$PATHLOG_FILE" "$DNSLOG_FILE" "$DNSFAIL_FILE" "$SOFT_RECONNECT_FILE" 2>/dev/null || true
     return 0
   fi
