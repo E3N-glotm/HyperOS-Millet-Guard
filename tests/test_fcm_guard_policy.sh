@@ -101,8 +101,12 @@ grep -q 'dns-unavailable' "$GUARD" \
   || fail "persistent DNS failure must limit repeated reconnect broadcasts"
 grep -q 'soft reconnect unverified state=' "$GUARD" \
   || fail "unverified GCM status must retain outage accounting"
-grep -q 'soft reconnect verified' "$GUARD" \
-  || fail "MCS endpoint verification is absent"
+grep -q 'soft reconnect MCS socket verified' "$GUARD" \
+  || fail "MCS socket attestation logging is absent"
+grep -q 'fcm_mcs_socket_ready "$endpoint"' "$GUARD" \
+  || fail "soft reconnect must check the established kernel socket"
+grep -q 'sock_uid==expected_uid && inode!="" && pid!=""' "$GUARD" \
+  || fail "MCS socket attestation does not require a real GMS UID and inode"
 if grep -q '\[ -n "$gpid" \] && \[ -n "$spid" \]' "$GUARD"; then
   fail "FCM guard must not depend on the optional Box/sing-box daemon"
 fi
