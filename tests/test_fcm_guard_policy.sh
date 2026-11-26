@@ -130,4 +130,25 @@ for line in \
   [ -n "$ip" ] || fail "DNS parser rejected canonical alias: $line"
 done
 
+# Android 17 has a Binder-backed DNS resolver. Never flush all mobile/IMS
+# NetIds or guess transaction IDs on unknown SDKs.
+grep -q '^dnsresolver_binder_ready()' "$GUARD" ||
+  fail "Android 17 DNS Binder service validation missing"
+grep -q '^dnsresolver_binder_flush_one()' "$GUARD" ||
+  fail "Android 17 scoped DNS cache recovery missing"
+grep -Fq '[ "$(getprop ro.build.version.sdk)" = 37 ]' "$GUARD" ||
+  fail "DNS Binder operation requires SDK gating"
+grep -q 'service call dnsresolver 1' "$GUARD" ||
+  fail "DNS Binder isAlive attestation missing"
+grep -q 'service call dnsresolver 11 i32 "$cache_id"' "$GUARD" ||
+  fail "DNS cache flush transaction not scoped to a validated NetId"
+grep -q '^dns_active_default_netid()' "$GUARD" ||
+  fail "active default resolver binding missing"
+grep -q 'DNSFLUSH_OUTAGE_FILE=' "$GUARD" ||
+  fail "per-outage DNS flush deduplication missing"
+if sed -n '/^flush_android_dns() {/,/^}/p' "$GUARD" |
+    grep -q 'for netid in $(dns_netids)'; then
+  fail "do not flush all secondary/IMS DNS resolver caches"
+fi
+
 echo "FCM guard policy regression checks passed"
