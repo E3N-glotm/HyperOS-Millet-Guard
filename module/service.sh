@@ -8,6 +8,7 @@ BB=/data/adb/magisk/busybox
 mkdir -p "$RUNDIR"
 chmod 700 "$RUNDIR"
 chmod 0755 "$MODDIR/bin/inotify_handler.sh" "$MODDIR/bin/reconcile.sh" "$MODDIR/bin/milletctl" "$MODDIR/bin/fcm_guard.sh" "$MODDIR/bin/fcm_event_worker.sh" "$MODDIR/bin/swipe_unstop_worker.sh" 2>/dev/null || true
+[ ! -f "$MODDIR/bin/fcm_wake_wait" ] || chmod 0755 "$MODDIR/bin/fcm_wake_wait" 2>/dev/null || true
 # v2.0.2 and newer use owner metadata for the reconcile lock. An ownerless
 # lock left by v2.0.1 can otherwise survive an in-place module upgrade until
 # its first safety pass. Reap only the legacy ownerless form here, before any
