@@ -8,6 +8,7 @@ BB=/data/adb/magisk/busybox
 mkdir -p "$RUNDIR"
 chmod 700 "$RUNDIR"
 chmod 0755 "$MODDIR/bin/inotify_handler.sh" "$MODDIR/bin/reconcile.sh" "$MODDIR/bin/milletctl" "$MODDIR/bin/fcm_guard.sh" "$MODDIR/bin/fcm_event_worker.sh" "$MODDIR/bin/swipe_unstop_worker.sh" 2>/dev/null || true
+[ ! -f "$MODDIR/bin/fcm_wake_wait" ] || chmod 0755 "$MODDIR/bin/fcm_wake_wait" 2>/dev/null || true
 # v2.0.2 and newer use owner metadata for the reconcile lock. An ownerless
 # lock left by v2.0.1 can otherwise survive an in-place module upgrade until
 # its first safety pass. Reap only the legacy ownerless form here, before any
@@ -48,19 +49,57 @@ echo $! > "$RUNDIR/inotifyd.pid"
   done
 ) >/dev/null 2>&1 &
 echo $! > "$RUNDIR/safety.pid"
-# FCM health is deliberately independent of reconcile.sh. A SettingsProvider
-# failure or reconciliation lock must not disable push recovery again. This is
-# only a fallback: deep suspend can defer shell sleeps, so the event worker
-# below also piggybacks on GMS's own AlarmManager wakeups.
+# The old two-minute sleep was NOT a wakeup alarm. During Deep Doze the
+# shell could go unexecuted for hours and even an otherwise sound recovery
+# state machine could not run. A CLOCK_BOOTTIME_ALARM timerfd wakes the kernel
+# without spinning, holding a permanent wakelock, touching alarm settings or
+# relying on system_server's delayed alarms. Unsupported devices fall back
+# to the original 120-second shell delay.
 (
+  wake_helper="$MODDIR/bin/fcm_wake_wait"
+  wake_supported=0
+  if [ "$(getprop ro.product.cpu.abi)" = arm64-v8a ] &&
+      [ -x "$wake_helper" ] &&
+      "$wake_helper" --probe >/dev/null 2>&1; then
+    wake_supported=1
+  fi
+  # Reconcile once at boot; the event worker continues to observe native GMS
+  # alarm events independently for quicker opportunistic checks.
+  if grep -Fxq 'com.google.android.gms' "$RUNDIR/packages.list" 2>/dev/null; then
+    /system/bin/sh "$MODDIR/bin/fcm_guard.sh" startup
+  fi
   while true; do
-    sleep 120
+    delay=600
+    # During a confirmed outage check at least every three minutes rather
+    # than waiting for a deferred 30-minute GMS reconnect alarm.
+    [ ! -f "$RUNDIR/fcm_down_since.epoch" ] || delay=180
+    if [ "$wake_supported" = 1 ]; then
+      if ! "$wake_helper" "$delay" >/dev/null 2>&1; then
+        wake_supported=0
+        sleep 120
+      fi
+    else
+      sleep 120
+    fi
     grep -Fxq 'com.google.android.gms' "$RUNDIR/packages.list" 2>/dev/null || continue
-    /system/bin/sh "$MODDIR/bin/fcm_guard.sh" poll
+    # Recovery can itself take several seconds; on kernels exposing Android
+    # timed suspend blockers, keep the CPU awake only during a *confirmed*
+    # outage and automatically expire the lock after 30s even on a crash.
+    # Healthy MCS polling never acquires a wakelock.
+    held=0
+    if [ -f "$RUNDIR/fcm_down_since.epoch" ] &&
+        [ -w /sys/power/wake_lock ] &&
+        printf 'millet_fcm_recovery 30000000000' > /sys/power/wake_lock 2>/dev/null; then
+      held=1
+    fi
+    /system/bin/sh "$MODDIR/bin/fcm_guard.sh" alarm-watchdog
+    if [ "$held" = 1 ] && [ -w /sys/power/wake_unlock ]; then
+      printf 'millet_fcm_recovery' > /sys/power/wake_unlock 2>/dev/null || true
+    fi
   done
 ) >/dev/null 2>&1 &
 echo $! > "$RUNDIR/fcm.pid"
-# No new timer/wakelock: observe existing GMS alarm deliveries and check FCM
+# Observe existing GMS alarm deliveries as a second, event-driven path.
 # when HyperOS has already woken the push stack.
 /system/bin/sh "$MODDIR/bin/fcm_event_worker.sh" >/dev/null 2>&1 &
 echo $! > "$RUNDIR/fcm_event.pid"

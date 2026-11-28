@@ -85,4 +85,70 @@ status=16777984
 err=$(( (status / 256) % 256 ))
 [ "$err" -eq 3 ] || fail "gtalk_connection UNKNOWN_HOST decoder regression"
 
+# A resolver query under the root UID is not equivalent to GMS on
+# TProxy/UID-routing systems. Require the real package UID on both probes.
+grep -q 'gms_uid_for_probe()' "$GUARD" \
+  || fail "GMS package UID probe missing"
+grep -q 'run_timeout su -s /system/bin/sh "$uid" -c' "$GUARD" \
+  || fail "FCM DNS probe must execute under the GMS UID"
+grep -q 'gms_uid_tcp_ready "$ip" "$port"' "$GUARD" \
+  || fail "MCS TCP probe must use the GMS UID"
+grep -Fq 'PING[[:space:]]+[^[:space:]]+' "$GUARD" \
+  || fail "DNS resolver parser must accept a CNAME result"
+grep -q 'scheduled-alarm-stalled-native-reconnect' "$GUARD" \
+  || fail "deferrable scheduled alarm must have bounded soft recovery"
+grep -q 'dns-unavailable' "$GUARD" \
+  || fail "persistent DNS failure must limit repeated reconnect broadcasts"
+grep -q 'soft reconnect unverified state=' "$GUARD" \
+  || fail "unverified GCM status must retain outage accounting"
+grep -q 'soft reconnect MCS socket verified' "$GUARD" \
+  || fail "MCS socket attestation logging is absent"
+grep -q 'fcm_mcs_socket_ready "$endpoint"' "$GUARD" \
+  || fail "soft reconnect must check the established kernel socket"
+grep -q 'sock_uid==expected_uid && inode!="" && pid!=""' "$GUARD" \
+  || fail "MCS socket attestation does not require a real GMS UID and inode"
+if grep -q '\[ -n "$gpid" \] && \[ -n "$spid" \]' "$GUARD"; then
+  fail "FCM guard must not depend on the optional Box/sing-box daemon"
+fi
+
+# Android ping outputs a canonical alias on GMS's actual UID: this was
+# reproduced on the target handset (root ping had a different A record).
+for line in \
+  'PING mtalk.google.com (64.233.189.188) 56(84) bytes of data.' \
+  'PING mobile-gtalk.l.google.com (173.194.43.188) 56(84) bytes of data.'; do
+  ip=$(printf '%s\n' "$line" | awk '
+    /^PING[[:space:]]+[^[:space:]]+[[:space:]]/ {
+      if (match($0, /\([0-9][0-9.]*\)/)) {
+        value=substr($0,RSTART+1,RLENGTH-2)
+        if (split(value, octets, ".")==4) {
+          good=1
+          for (i=1;i<=4;i++) if (octets[i] !~ /^[0-9]+$/ || octets[i]>255) good=0
+          if (good) {print value;exit}
+        }
+      }
+    }')
+  [ -n "$ip" ] || fail "DNS parser rejected canonical alias: $line"
+done
+
+# Android 17 has a Binder-backed DNS resolver. Never flush all mobile/IMS
+# NetIds or guess transaction IDs on unknown SDKs.
+grep -q '^dnsresolver_binder_ready()' "$GUARD" ||
+  fail "Android 17 DNS Binder service validation missing"
+grep -q '^dnsresolver_binder_flush_one()' "$GUARD" ||
+  fail "Android 17 scoped DNS cache recovery missing"
+grep -Fq '[ "$(getprop ro.build.version.sdk)" = 37 ]' "$GUARD" ||
+  fail "DNS Binder operation requires SDK gating"
+grep -q 'service call dnsresolver 1' "$GUARD" ||
+  fail "DNS Binder isAlive attestation missing"
+grep -q 'service call dnsresolver 11 i32 "$cache_id"' "$GUARD" ||
+  fail "DNS cache flush transaction not scoped to a validated NetId"
+grep -q '^dns_active_default_netid()' "$GUARD" ||
+  fail "active default resolver binding missing"
+grep -q 'DNSFLUSH_OUTAGE_FILE=' "$GUARD" ||
+  fail "per-outage DNS flush deduplication missing"
+if sed -n '/^flush_android_dns() {/,/^}/p' "$GUARD" |
+    grep -q 'for netid in $(dns_netids)'; then
+  fail "do not flush all secondary/IMS DNS resolver caches"
+fi
+
 echo "FCM guard policy regression checks passed"

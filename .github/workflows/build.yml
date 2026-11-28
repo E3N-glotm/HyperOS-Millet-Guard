@@ -19,6 +19,7 @@ jobs:
           for f in module/*.sh module/bin/*; do sh -n "$f"; done
           sh -n tests/test_reconcile_lock.sh
           sh -n tests/test_fcm_guard_policy.sh
+          sh -n tests/test_fcm_deep_sleep_recovery.sh
           sh -n tests/test_scope_boundaries.sh
           sh -n extras/box-for-root/net.inotify
           sh -n tests/test_box_net_inotify_policy.sh
@@ -29,6 +30,8 @@ jobs:
         run: sh tests/test_reconcile_lock.sh
       - name: FCM DNS recovery regression
         run: sh tests/test_fcm_guard_policy.sh
+      - name: Deep sleep autonomous recovery regression
+        run: sh tests/test_fcm_deep_sleep_recovery.sh
       - name: Module scope regression
         run: sh tests/test_scope_boundaries.sh
       - name: Box network anti-loop regression

@@ -31,5 +31,6 @@ set_perm "$MODPATH/bin/reconcile.sh" 0 0 0755
 set_perm "$MODPATH/bin/inotify_handler.sh" 0 0 0755
 set_perm "$MODPATH/bin/milletctl" 0 0 0755
 set_perm "$MODPATH/bin/fcm_guard.sh" 0 0 0755
+[ ! -f "$MODPATH/bin/fcm_wake_wait" ] || set_perm "$MODPATH/bin/fcm_wake_wait" 0 0 0755
 set_perm "$MODPATH/bin/fcm_event_worker.sh" 0 0 0755
 set_perm "$MODPATH/bin/lib.sh" 0 0 0644

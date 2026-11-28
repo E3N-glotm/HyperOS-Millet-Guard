@@ -9,6 +9,7 @@ PATHLOG_FILE=$RUNDIR/fcm_path_fail_log.epoch
 DNSLOG_FILE=$RUNDIR/fcm_dns_fail_log.epoch
 DNSFAIL_FILE=$RUNDIR/fcm_dns_fail.epoch
 DNSFLUSH_FILE=$RUNDIR/fcm_dns_flush.epoch
+DNSFLUSH_OUTAGE_FILE=$RUNDIR/fcm_dns_flush_outage.epoch
 SOFT_RECONNECT_FILE=$RUNDIR/fcm_soft_reconnect.epoch
 BYPASS_UID_FILE=$RUNDIR/fcm_bypass.uid
 KEEPALIVE_FILE=$RUNDIR/fcm_keepalive.epoch
@@ -224,14 +225,62 @@ gcm_reconnect_scheduler_state() {
   fi
 }
 
+# A transient GcmService connected flag is not proof of a usable TCP
+# session. Compare the reported MCS host/IP/port with exactly one established
+# kernel socket owned by the installed Google Play services UID.
+fcm_mcs_socket_ready() {
+  ep=$1
+  case "$ep" in
+    connected=mtalk.google.com/*,port=*|connected=alt[0-9]*-mtalk.google.com/*,port=*) ;;
+    *) return 1 ;;
+  esac
+  peer=${ep#*/}
+  peer=${peer%,port=*}
+  peer=${peer#\[}; peer=${peer%\]}
+  peer=${peer#::ffff:}
+  port=${ep##*,port=}
+  case "$peer" in ''|*[!0-9a-fA-F:.]*) return 1;; esac
+  case "$port" in 5228|5229|5230|443) ;; *) return 1;; esac
+  command -v ss >/dev/null 2>&1 || return 1
+  uid=$(gms_uid_for_probe 2>/dev/null) || return 1
+  matched=$(run_timeout ss -Htnpe state established "( dport = :$port )" 2>/dev/null |
+    awk -v expected="$peer" -v expected_port="$port" -v expected_uid="$uid" '
+      {
+        address=$4; actual_port=address
+        sub(/^.*:/,"",actual_port)
+        sub(/:[^:]*$/,"",address)
+        sub(/^\[/,"",address); sub(/\]$/,"",address)
+        sub(/^::ffff:/,"",address)
+        if (address!=expected || actual_port!=expected_port) next
+        sock_uid=""; inode=""; pid=""
+        for (i=5;i<=NF;i++) {
+          if ($i ~ /^uid:[0-9]+$/) {sock_uid=$i;sub(/^uid:/,"",sock_uid)}
+          if ($i ~ /^ino:[0-9]+$/) {inode=$i;sub(/^ino:/,"",inode)}
+        }
+        if (match($0,/pid=[0-9]+,fd=[0-9]+/)) pid=substr($0,RSTART,RLENGTH)
+        if (sock_uid==expected_uid && inode!="" && pid!="") count++
+      }
+      END {if (count==1) print "verified"}
+    ')
+  [ "$matched" = verified ]
+}
+
 soft_reconnect_if_stalled() {
   soft_now=$1
   soft_outage=$2
   [ "$soft_outage" -ge 120 ] 2>/dev/null || return 1
 
   scheduler_state=$(gcm_reconnect_scheduler_state)
+  soft_gap=180
   case "$scheduler_state" in
     overdue) soft_reason=overdue-scheduler ;;
+    scheduled)
+      # A scheduled reconnect alarm can remain deferred in deep mobile idle.
+      # A low-impact broadcast is safer than waiting hours for a stale alarm.
+      [ "$soft_outage" -ge 120 ] 2>/dev/null || return 1
+      soft_reason=scheduled-alarm-stalled-native-reconnect
+      soft_gap=300
+      ;;
     missing)
       # Avoid racing the short window between one reconnect attempt and GMS
       # registering its next alarm. A completely missing scheduler is only
@@ -242,9 +291,15 @@ soft_reconnect_if_stalled() {
     *) return 1 ;;
   esac
 
+  # Repeating GCM_RECONNECT cannot repair native DNS; reduce wakeups after
+  # 15 minutes of confirmed DNS failure while preserving early recovery.
+  if [ "${3:-}" = dns-failed ] && [ "$soft_outage" -ge 900 ] 2>/dev/null; then
+    soft_gap=1800
+    soft_reason="$soft_reason-dns-unavailable"
+  fi
   soft_last=$(cat "$SOFT_RECONNECT_FILE" 2>/dev/null)
   case "$soft_last" in ''|*[!0-9]*) soft_last=0;; esac
-  [ $((soft_now-soft_last)) -ge 300 ] 2>/dev/null || return 1
+  [ $((soft_now-soft_last)) -ge "$soft_gap" ] 2>/dev/null || return 1
   printf '%s\n' "$soft_now" > "$SOFT_RECONNECT_FILE"
 
   # This is the same reconnect event GMS normally receives from its own
@@ -260,48 +315,89 @@ soft_reconnect_if_stalled() {
   fi
   sleep 8
 
-  if [ "$(fcm_state)" = "connected" ]; then
-    endpoint=$(run_timeout dumpsys activity service com.google.android.gms/.gcm.GcmService 2>/dev/null \
-      | grep -m1 'connected=' | sed 's/^[[:space:]]*//' || true)
-    log_msg "FCM guard: soft reconnect recovered ${endpoint:-endpoint-unavailable}"
+  # A connected flag without a concrete MCS endpoint was logged as a
+  # successful recovery on 2026-11-26; retain the outage timer in that case.
+  soft_state=$(fcm_state)
+  endpoint=$(run_timeout dumpsys activity service com.google.android.gms/.gcm.GcmService 2>/dev/null \
+    | grep -m1 'connected=' | sed 's/^[[:space:]]*//' || true)
+  if [ "$soft_state" = connected ] \
+      && fcm_mcs_socket_ready "$endpoint"; then
+    log_msg "FCM guard: soft reconnect MCS socket verified $endpoint"
     rm -f "$DOWN_FILE" "$ATTEMPT_FILE" "$PATHLOG_FILE" "$DNSLOG_FILE" "$DNSFAIL_FILE" "$SOFT_RECONNECT_FILE" 2>/dev/null || true
     return 0
   fi
 
-  log_msg "FCM guard: soft reconnect delivered but GcmService remains disconnected"
+  log_msg "FCM guard: soft reconnect unverified state=$soft_state ${endpoint:-endpoint-unavailable}; outage retained"
   return 1
 }
 
+gms_uid_for_probe() {
+  uid=$(pm list packages -U com.google.android.gms 2>/dev/null \
+    | awk '$1 == "package:com.google.android.gms" { sub(/^uid:/, "", $2); print $2; exit }')
+  case "$uid" in ''|*[!0-9]*) return 1;; esac
+  printf '%s\n' "$uid"
+}
+
+gms_uid_tcp_ready() {
+  probe_ip=$1; probe_port=$2
+  probe_uid=$(gms_uid_for_probe) || return 1
+  command -v su >/dev/null 2>&1 || return 1
+  "$BB" timeout 7 su -s /system/bin/sh "$probe_uid" -c \
+    "/system/bin/toybox nc -z -w 4 $probe_ip $probe_port >/dev/null 2>&1"
+}
+
 fcm_path_ready() {
-  # Use the same Android resolver path as GMS. A direct nslookup from the
-  # module shell is not an independent probe on TProxy systems because Box may
-  # hijack it back through the same sing-box DNS policy.
-  ip=$(android_resolve_mtalk 2>/dev/null || true)
-  [ -n "$ip" ] || return 1
-  for port in 5228 5229 5230; do
-    if "$BB" timeout 6 "$BB" nc -z -w 4 "$ip" "$port" >/dev/null 2>&1; then
-      printf '%s %s %s\n' android "$ip" "$port"
-      return 0
+  # Prove a routable real MCS address with GMS's UID, not a root-only DNS
+  # or a generic TCP/443 connection. Google can migrate MCS to alt hosts
+  # on 443 while the main mtalk DNS name is temporarily unavailable.
+  for host in mtalk.google.com alt1-mtalk.google.com alt2-mtalk.google.com alt3-mtalk.google.com; do
+    ip=$(android_resolve_gms_domain "$host" 2>/dev/null || true)
+    [ -n "$ip" ] || continue
+    if [ "$host" = mtalk.google.com ]; then
+      ports="5228 5229 5230 443"
+    else
+      ports="443 5228"
     fi
+    for port in $ports; do
+      if gms_uid_tcp_ready "$ip" "$port"; then
+        printf 'gms-uid:%s %s %s\n' "$host" "$ip" "$port"
+        return 0
+      fi
+    done
   done
   return 1
 }
 
-android_resolve_mtalk() {
-  # Deliberately use Android's libc/netd resolver path instead of direct
-  # nslookup. The latter can succeed against a configured upstream while GMS
-  # itself is still receiving UNKNOWN_HOST through Android's resolver chain.
-  out=$(run_timeout /system/bin/ping -c 1 -W 1 mtalk.google.com 2>&1 || true)
+android_resolve_gms_domain() {
+  host=$1
+  case "$host" in
+    mtalk.google.com|alt[0-9]-mtalk.google.com) ;;
+    *) return 1 ;;
+  esac
+  uid=$(gms_uid_for_probe) || return 1
+  command -v su >/dev/null 2>&1 || return 1
+  out=$(run_timeout su -s /system/bin/sh "$uid" -c \
+    "/system/bin/ping -c 1 -W 1 $host" 2>&1 || true)
+  # The PING header may display a canonical alias (mobile-gtalk...).
+  # Validate only the returned numeric IPv4, not its textual alias.
   ip=$(printf '%s\n' "$out" | awk '
-    /PING[[:space:]]+mtalk[.]google[.]com/ {
+    /^PING[[:space:]]+[^[:space:]]+[[:space:]]/ {
       if (match($0, /\([0-9][0-9.]*\)/)) {
-        value=substr($0, RSTART+1, RLENGTH-2)
-        if (split(value, octets, ".") == 4) { print value; exit }
+        value=substr($0,RSTART+1,RLENGTH-2)
+        if (split(value,octets,".")==4) {
+          good=1
+          for (i=1;i<=4;i++) if(octets[i]!~/^[0-9]+$/||octets[i]>255) good=0
+          if(good) {print value; exit}
+        }
       }
     }
   ')
   case "$ip" in *.*.*.*) printf '%s\n' "$ip"; return 0;; esac
   return 1
+}
+
+android_resolve_mtalk() {
+  android_resolve_gms_domain mtalk.google.com
 }
 
 recent_gms_unknown_host_epoch() {
@@ -352,42 +448,86 @@ dns_netids() {
   '
 }
 
+# Only a known Android 17 IDnsResolver may use the Binder cache flush
+# transaction. Old ndc / cmd netd resolver flushnet paths are unsupported on
+# this firmware. Never guess a transaction for unknown SDK/OEM services.
+dnsresolver_binder_ready() {
+  [ "$(getprop ro.build.version.sdk)" = 37 ] || return 1
+  service list 2>/dev/null |
+    grep -Fq 'dnsresolver: [android.net.IDnsResolver]' || return 1
+  alive=$("$BB" timeout 5 service call dnsresolver 1 2>&1) || return 1
+  printf '%s\n' "$alive" |
+    grep -Eq '^Result: Parcel\([[:space:]]*00000000[[:space:]]+00000001([[:space:]]|$)'
+}
+
+dnsresolver_binder_flush_one() {
+  cache_id=$1
+  case "$cache_id" in ''|*[!0-9]*) return 1;; esac
+  # AOSP Android17 IDnsResolver.flushNetworkCache(netId): transaction 11.
+  # Check the Binder exception code; a successful shell exit is insufficient.
+  reply=$("$BB" timeout 5 service call dnsresolver 11 i32 "$cache_id" 2>&1) || return 1
+  printf '%s\n' "$reply" |
+    grep -Eq "^Result: Parcel\([[:space:]]*00000000[[:space:]]+"
+}
+
+dns_active_default_netid() {
+  default_id=$(run_timeout dumpsys connectivity 2>/dev/null | awk '
+    $1=="Active" && $2=="default" && $3=="network:" &&
+    $4 ~ /^[0-9]+$/ {print $4; exit}
+  ')
+  case "$default_id" in ''|*[!0-9]*) return 1;; esac
+  dns_netids | grep -Fxq "$default_id" || return 1
+  printf '%s\n' "$default_id"
+}
+
 flush_android_dns() {
   flush_now=$1
+  outage_stamp=$(cat "$DOWN_FILE" 2>/dev/null)
+  case "$outage_stamp" in ''|*[!0-9]*) return 0;; esac
+  # One successful cache flush per confirmed outage; never flush stale,
+  # IMS, inactive or other users' network caches.
+  [ "$(cat "$DNSFLUSH_OUTAGE_FILE" 2>/dev/null)" != "$outage_stamp" ] || return 0
   last_flush=$(cat "$DNSFLUSH_FILE" 2>/dev/null)
   case "$last_flush" in ''|*[!0-9]*) last_flush=0;; esac
   [ $((flush_now-last_flush)) -ge 300 ] 2>/dev/null || return 0
-  printf '%s\n' "$flush_now" > "$DNSFLUSH_FILE"
 
+  active_id=$(dns_active_default_netid) || {
+    log_msg "FCM guard: no proven active default DNS resolver cache; skip flush"
+    return 0
+  }
+  printf '%s\n' "$flush_now" > "$DNSFLUSH_FILE"
   flushed=0
-  for netid in $(dns_netids); do
+  binder_flushed=0
+  if dnsresolver_binder_ready && dnsresolver_binder_flush_one "$active_id"; then
+    flushed=1
+    binder_flushed=1
+  else
+    # Legacy paths are only a fallback; reject misleading success messages.
     if command -v ndc >/dev/null 2>&1; then
-      ndc_out=$("$BB" timeout 5 ndc resolver flushnet "$netid" 2>&1)
+      ndc_out=$("$BB" timeout 5 ndc resolver flushnet "$active_id" 2>&1)
       ndc_rc=$?
       case "$ndc_out" in
         *'Command not recognized'*|*'Failure calling service'*|*'Failed transaction'*|*'Exception'*) ndc_ok=0 ;;
         [45][0-9][0-9]' '*) ndc_ok=0 ;;
         *) [ "$ndc_rc" -eq 0 ] 2>/dev/null && ndc_ok=1 || ndc_ok=0 ;;
       esac
-      if [ "$ndc_ok" -eq 1 ] 2>/dev/null; then
-        flushed=$((flushed+1))
-        continue
-      fi
+      [ "$ndc_ok" -eq 1 ] && flushed=1
     fi
-    cmd_out=$("$BB" timeout 5 cmd netd resolver flushnet "$netid" 2>&1)
-    cmd_rc=$?
-    case "$cmd_out" in
-      *'Command not recognized'*|*'Failure calling service'*|*'Failed transaction'*|*'Exception'*) cmd_ok=0 ;;
-      *) [ "$cmd_rc" -eq 0 ] 2>/dev/null && cmd_ok=1 || cmd_ok=0 ;;
-    esac
-    if [ "$cmd_ok" -eq 1 ] 2>/dev/null; then
-      flushed=$((flushed+1))
+    if [ "$flushed" = 0 ]; then
+      cmd_out=$("$BB" timeout 5 cmd netd resolver flushnet "$active_id" 2>&1)
+      cmd_rc=$?
+      case "$cmd_out" in
+        *'Command not recognized'*|*'Failure calling service'*|*'Failed transaction'*|*'Exception'*) cmd_ok=0 ;;
+        *) [ "$cmd_rc" -eq 0 ] 2>/dev/null && cmd_ok=1 || cmd_ok=0 ;;
+      esac
+      [ "$cmd_ok" = 1 ] && flushed=1
     fi
-  done
-  if [ "$flushed" -gt 0 ] 2>/dev/null; then
-    log_msg "FCM guard: flushed Android DNS cache networks=$flushed"
+  fi
+  if [ "$flushed" -eq 1 ]; then
+    printf '%s\n' "$outage_stamp" > "$DNSFLUSH_OUTAGE_FILE"
+    log_msg "FCM guard: one scoped DNS cache flush active_netid=$active_id binder=$binder_flushed outage=$outage_stamp; transport still unverified"
   else
-    log_msg "FCM guard: Android DNS cache flush unsupported/no active resolver netId; restart remains blocked while DNS is unhealthy"
+    log_msg "FCM guard: scoped Android DNS flush unsupported/failed netid=$active_id; no success claimed"
   fi
 }
 
@@ -410,6 +550,37 @@ rate_limited_path_log() {
     echo "$now" > "$PATHLOG_FILE"
     log_msg "FCM guard: GcmService disconnected but mtalk TCP path unavailable; no GMS restart"
   fi
+}
+
+# A validated default network is not proof of MCS reachability, but is
+# enough evidence for ONE carefully bounded last-resort GMS-host recycle
+# after an otherwise unrecoverable 30-minute DNS outage. Never cycle Wi-Fi,
+# cellular, netd or a global proxy from this guard.
+fcm_default_net_validated() {
+  # dumpsys connectivity can exceed Android's MAX_ARG_STRLEN; never store
+  # its entire output in a shell variable or pipe it through printf.
+  # Match the active default NetId and its CURRENT network capabilities,
+  # not an unrelated network request or EVER_VALIDATED score flag.
+  run_timeout dumpsys connectivity 2>/dev/null | awk '
+    $1=="Active" && $2=="default" && $3=="network:" {
+      id=$4
+      if (id !~ /^[0-9]+$/) id=""
+      next
+    }
+    id!="" && index($0,"NetworkAgentInfo{") &&
+      index($0,"network{"id"}") {
+      n=index($0,"nc{[")
+      if (!n) next
+      caps=substr($0,n)
+      if (caps !~ /Capabilities:/) next
+      sub(/^.*Capabilities:[[:space:]]*/,"",caps)
+      sub(/[[:space:]].*$/,"",caps)
+      caps="&"caps"&"
+      if (index(caps,"&INTERNET&") && index(caps,"&VALIDATED&"))
+        matched=1
+    }
+    END {exit !matched}
+  '
 }
 
 # Polling and the event worker can wake at the same time. Serialize the whole
@@ -449,8 +620,8 @@ esac
 # com.google.android.gms.persistent process.
 gpid=$(pidof com.google.android.gms.persistent 2>/dev/null | awk '{print $1}')
 [ -n "$gpid" ] || gpid=$(pidof com.google.android.gms 2>/dev/null | awk '{print $1}')
-spid=$(pidof sing-box 2>/dev/null | awk '{print $1}')
-[ -n "$gpid" ] && [ -n "$spid" ] || exit 0
+[ -n "$gpid" ] || exit 0
+# Box/sing-box is optional; the FCM guard must operate without a proxy.
 
 if [ ! -f "$DOWN_FILE" ]; then
   echo "$now" > "$DOWN_FILE"
@@ -474,8 +645,11 @@ if [ "$outage" -ge 60 ] 2>/dev/null; then
       remember_dns_failure "$unknown_epoch"
       flush_android_dns "$now"
       rate_limited_dns_log "$now" "GMS reported UNKNOWN_HOST ${unknown_age}s ago; DNS remediation only, no GMS restart"
-      soft_reconnect_if_stalled "$now" "$outage" || true
-      exit 0
+      soft_reconnect_if_stalled "$now" "$outage" dns-failed || true
+      # After fifteen minutes, do not let a stale UNKNOWN_HOST permanently
+      # prevent escalation. A GMS-owned alternative MCS path must still be
+      # proved before any process intervention.
+      [ "$outage" -ge 900 ] 2>/dev/null || exit 0
     fi
   fi
 
@@ -484,13 +658,15 @@ if [ "$outage" -ge 60 ] 2>/dev/null; then
     remember_dns_failure "$now"
     flush_android_dns "$now"
     rate_limited_dns_log "$now" "Android resolver cannot resolve mtalk.google.com; DNS remediation only, no GMS restart"
-    soft_reconnect_if_stalled "$now" "$outage" || true
-    exit 0
+    soft_reconnect_if_stalled "$now" "$outage" dns-failed || true
+    [ "$outage" -ge 900 ] 2>/dev/null || exit 0
   fi
 
   last_dns_fail=$(cat "$DNSFAIL_FILE" 2>/dev/null)
   case "$last_dns_fail" in ''|*[!0-9]*) last_dns_fail=0;; esac
-  if [ "$last_dns_fail" -gt 0 ] 2>/dev/null && [ $((now-last_dns_fail)) -lt 300 ] 2>/dev/null; then
+  if [ "$last_dns_fail" -gt 0 ] 2>/dev/null &&
+      [ $((now-last_dns_fail)) -lt 300 ] 2>/dev/null &&
+      [ "$outage" -lt 900 ] 2>/dev/null; then
     rate_limited_dns_log "$now" "Android resolver recovered mtalk=$android_ip but is inside 300s stability grace; no GMS restart"
     exit 0
   fi
@@ -503,6 +679,14 @@ if soft_reconnect_if_stalled "$now" "$outage"; then
   exit 0
 fi
 
+# Never terminate Google Play services within two minutes of a fresh
+# soft GCM_RECONNECT. The native stack gets first opportunity to repair.
+soft_sent=$(cat "$SOFT_RECONNECT_FILE" 2>/dev/null)
+case "$soft_sent" in ''|*[!0-9]*) soft_sent=0;; esac
+if [ "$soft_sent" -gt 0 ] && [ $((now-soft_sent)) -lt 120 ]; then
+  exit 0
+fi
+
 # Give Google's own reconnect logic five minutes before intervention. The old
 # 10m grace plus 30/60/120m retry schedule could turn one stuck MCS state into
 # a multi-hour push outage.
@@ -511,14 +695,28 @@ fi
 # Distinguish a stuck GMS/MCS client from a genuine FCM path outage. Restarting
 # GMS cannot repair an unreachable network and would only waste battery.
 path=$(fcm_path_ready 2>/dev/null || true)
+verified_mcs=1
 if [ -z "$path" ]; then
+  verified_mcs=0
   rate_limited_path_log "$now"
-  exit 0
+  # A native DNS failure used to lock recovery out for over four hours.
+  # Do not churn GMS without network evidence. After 30 minutes on a
+  # validated default network, permit a small number of GMS-only restarts,
+  # never a global modem/Wi-Fi/Box reset.
+  [ "$outage" -ge 1800 ] 2>/dev/null || exit 0
+  fcm_default_net_validated || exit 0
+  path="validated-network unverified 0"
+else
+  rm -f "$PATHLOG_FILE" 2>/dev/null || true
 fi
-rm -f "$PATHLOG_FILE" 2>/dev/null || true
 
 attempts=$(cat "$ATTEMPT_FILE" 2>/dev/null)
 case "$attempts" in ''|*[!0-9]*) attempts=0;; esac
+# Never repeatedly kill GMS on a network that cannot prove a direct MCS
+# destination. Two recovery cycles per outage, spaced at least one hour.
+if [ "$verified_mcs" = 0 ] && [ "$attempts" -ge 2 ]; then
+  exit 0
+fi
 last=$(cat "$LAST_FILE" 2>/dev/null)
 case "$last" in ''|*[!0-9]*) last=0;; esac
 
@@ -533,6 +731,9 @@ case "$attempts" in
   4|5) min_gap=1800 ;;
   *) min_gap=3600 ;;
 esac
+if [ "$verified_mcs" = 0 ]; then
+  min_gap=3600
+fi
 [ $((now-last)) -ge "$min_gap" ] 2>/dev/null || exit 0
 
 resolver=${path%% *}
@@ -540,21 +741,31 @@ rest=${path#* }
 ip=${rest%% *}
 port=${rest##* }
 android_ip=$(android_resolve_mtalk 2>/dev/null || true)
-[ -n "$android_ip" ] || exit 0
-log_msg "FCM guard: outage=${outage}s fcm_path=ok resolver=$resolver endpoint=$ip:$port android_resolver=$android_ip; restarting GMS-host pid=$gpid attempt=$((attempts+1))"
+# A proved alternate MCS socket is enough to attempt bounded recovery even
+# when the primary mtalk alias is broken. No unverified root-only route.
+[ -n "$android_ip" ] || android_ip=primary-unavailable
+if [ "$verified_mcs" = 1 ]; then
+  log_msg "FCM guard: outage=${outage}s GMS-owned MCS path=$resolver endpoint=$ip:$port primary_dns=$android_ip; restarting GMS-host pid=$gpid attempt=$((attempts+1))"
+else
+  log_msg "FCM guard: LAST-RESORT outage=${outage}s default network VALIDATED but MCS/DNS path unproven; one GMS-only restart pid=$gpid attempt=$((attempts+1)); global network retained"
+fi
+# pidof is not identity proof: never send signals to a reused or wrong PID.
+expected_uid=$(gms_uid_for_probe) || exit 0
+actual_uid=$(awk '/^Uid:/{print $2;exit}' "/proc/$gpid/status" 2>/dev/null)
+[ "$actual_uid" = "$expected_uid" ] || exit 0
 echo "$now" > "$LAST_FILE"
 echo $((attempts+1)) > "$ATTEMPT_FILE"
 kill -TERM "$gpid" 2>/dev/null || exit 0
 sleep 20
 
 state2=$(fcm_state)
-if [ "$state2" = "connected" ]; then
+endpoint=$(run_timeout dumpsys activity service com.google.android.gms/.gcm.GcmService 2>/dev/null \
+  | grep -m1 'connected=' | sed 's/^[[:space:]]*//' || true)
+if [ "$state2" = connected ] && fcm_mcs_socket_ready "$endpoint"; then
   rm -f "$DOWN_FILE" "$ATTEMPT_FILE" "$PATHLOG_FILE" "$DNSLOG_FILE" "$DNSFAIL_FILE" "$SOFT_RECONNECT_FILE" 2>/dev/null || true
   newpid=$(pidof com.google.android.gms.persistent 2>/dev/null | awk '{print $1}')
   [ -n "$newpid" ] || newpid=$(pidof com.google.android.gms 2>/dev/null | awk '{print $1}')
-  endpoint=$(run_timeout dumpsys activity service com.google.android.gms/.gcm.GcmService 2>/dev/null \
-    | grep -m1 'connected=' | sed 's/^[[:space:]]*//' || true)
-  log_msg "FCM guard: recovered newpid=${newpid:-unknown} ${endpoint:-endpoint-unavailable}"
+  log_msg "FCM guard: recovered and MCS socket verified newpid=${newpid:-unknown} $endpoint"
 else
-  log_msg "FCM guard: restart issued but GcmService state=$state2; retry schedule retained"
+  log_msg "FCM guard: restart issued but MCS socket unverified state=$state2; retry schedule retained"
 fi
