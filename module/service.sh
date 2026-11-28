@@ -81,7 +81,20 @@ echo $! > "$RUNDIR/safety.pid"
       sleep 120
     fi
     grep -Fxq 'com.google.android.gms' "$RUNDIR/packages.list" 2>/dev/null || continue
+    # Recovery can itself take several seconds; on kernels exposing Android
+    # timed suspend blockers, keep the CPU awake only during a *confirmed*
+    # outage and automatically expire the lock after 30s even on a crash.
+    # Healthy MCS polling never acquires a wakelock.
+    held=0
+    if [ -f "$RUNDIR/fcm_down_since.epoch" ] &&
+        [ -w /sys/power/wake_lock ] &&
+        printf 'millet_fcm_recovery 30000000000' > /sys/power/wake_lock 2>/dev/null; then
+      held=1
+    fi
     /system/bin/sh "$MODDIR/bin/fcm_guard.sh" alarm-watchdog
+    if [ "$held" = 1 ] && [ -w /sys/power/wake_unlock ]; then
+      printf 'millet_fcm_recovery' > /sys/power/wake_unlock 2>/dev/null || true
+    fi
   done
 ) >/dev/null 2>&1 &
 echo $! > "$RUNDIR/fcm.pid"
