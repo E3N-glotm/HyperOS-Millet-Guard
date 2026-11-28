@@ -552,6 +552,22 @@ rate_limited_path_log() {
   fi
 }
 
+# A validated default network is not proof of MCS reachability, but is
+# enough evidence for ONE carefully bounded last-resort GMS-host recycle
+# after an otherwise unrecoverable 30-minute DNS outage. Never cycle Wi-Fi,
+# cellular, netd or a global proxy from this guard.
+fcm_default_net_validated() {
+  status=$(run_timeout dumpsys connectivity 2>/dev/null) || return 1
+  active_id=$(printf '%s\n' "$status" | awk '
+    $1=="Active" && $2=="default" && $3=="network:" &&
+      $4 ~ /^[0-9]+$/ {print $4;exit}')
+  case "$active_id" in ''|*[!0-9]*) return 1;; esac
+  printf '%s\n' "$status" | awk -v id="$active_id" '
+    index($0,"network{"id"}") && /Capabilities:/ &&
+      /INTERNET/ && /VALIDATED/ {found=1}
+    END {exit !found}'
+}
+
 # Polling and the event worker can wake at the same time. Serialize the whole
 # guard so they cannot duplicate firewall rules or race restart accounting.
 acquire_guard_lock || exit 0
@@ -664,14 +680,28 @@ fi
 # Distinguish a stuck GMS/MCS client from a genuine FCM path outage. Restarting
 # GMS cannot repair an unreachable network and would only waste battery.
 path=$(fcm_path_ready 2>/dev/null || true)
+verified_mcs=1
 if [ -z "$path" ]; then
+  verified_mcs=0
   rate_limited_path_log "$now"
-  exit 0
+  # A native DNS failure used to lock recovery out for over four hours.
+  # Do not churn GMS without network evidence. After 30 minutes on a
+  # validated default network, permit a small number of GMS-only restarts,
+  # never a global modem/Wi-Fi/Box reset.
+  [ "$outage" -ge 1800 ] 2>/dev/null || exit 0
+  fcm_default_net_validated || exit 0
+  path="validated-network unverified 0"
+else
+  rm -f "$PATHLOG_FILE" 2>/dev/null || true
 fi
-rm -f "$PATHLOG_FILE" 2>/dev/null || true
 
 attempts=$(cat "$ATTEMPT_FILE" 2>/dev/null)
 case "$attempts" in ''|*[!0-9]*) attempts=0;; esac
+# Never repeatedly kill GMS on a network that cannot prove a direct MCS
+# destination. Two recovery cycles per outage, spaced at least one hour.
+if [ "$verified_mcs" = 0 ] && [ "$attempts" -ge 2 ]; then
+  exit 0
+fi
 last=$(cat "$LAST_FILE" 2>/dev/null)
 case "$last" in ''|*[!0-9]*) last=0;; esac
 
@@ -686,6 +716,9 @@ case "$attempts" in
   4|5) min_gap=1800 ;;
   *) min_gap=3600 ;;
 esac
+if [ "$verified_mcs" = 0 ]; then
+  min_gap=3600
+fi
 [ $((now-last)) -ge "$min_gap" ] 2>/dev/null || exit 0
 
 resolver=${path%% *}
@@ -696,7 +729,15 @@ android_ip=$(android_resolve_mtalk 2>/dev/null || true)
 # A proved alternate MCS socket is enough to attempt bounded recovery even
 # when the primary mtalk alias is broken. No unverified root-only route.
 [ -n "$android_ip" ] || android_ip=primary-unavailable
-log_msg "FCM guard: outage=${outage}s GMS-owned path verified $resolver endpoint=$ip:$port primary_dns=$android_ip; restarting GMS-host pid=$gpid attempt=$((attempts+1))"
+if [ "$verified_mcs" = 1 ]; then
+  log_msg "FCM guard: outage=${outage}s GMS-owned MCS path=$resolver endpoint=$ip:$port primary_dns=$android_ip; restarting GMS-host pid=$gpid attempt=$((attempts+1))"
+else
+  log_msg "FCM guard: LAST-RESORT outage=${outage}s default network VALIDATED but MCS/DNS path unproven; one GMS-only restart pid=$gpid attempt=$((attempts+1)); global network retained"
+fi
+# pidof is not identity proof: never send signals to a reused or wrong PID.
+expected_uid=$(gms_uid_for_probe) || exit 0
+actual_uid=$(awk '/^Uid:/{print $2;exit}' "/proc/$gpid/status" 2>/dev/null)
+[ "$actual_uid" = "$expected_uid" ] || exit 0
 echo "$now" > "$LAST_FILE"
 echo $((attempts+1)) > "$ATTEMPT_FILE"
 kill -TERM "$gpid" 2>/dev/null || exit 0
