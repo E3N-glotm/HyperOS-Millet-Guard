@@ -240,7 +240,7 @@ fcm_mcs_socket_ready() {
   peer=${peer#::ffff:}
   port=${ep##*,port=}
   case "$peer" in ''|*[!0-9a-fA-F:.]*) return 1;; esac
-  case "$port" in 5228|5229|5230) ;; *) return 1;; esac
+  case "$port" in 5228|5229|5230|443) ;; *) return 1;; esac
   command -v ss >/dev/null 2>&1 || return 1
   uid=$(gms_uid_for_probe 2>/dev/null) || return 1
   matched=$(run_timeout ss -Htnpe state established "( dport = :$port )" 2>/dev/null |
@@ -347,42 +347,57 @@ gms_uid_tcp_ready() {
 }
 
 fcm_path_ready() {
-  # Probe direct MCS reachability as GMS, not as root through a different
-  # Box/TProxy UID policy. Failure never justifies terminating GMS.
-  ip=$(android_resolve_mtalk 2>/dev/null || true)
-  [ -n "$ip" ] || return 1
-  for port in 5228 5229 5230; do
-    if gms_uid_tcp_ready "$ip" "$port"; then
-      printf '%s %s %s\n' gms-uid "$ip" "$port"
-      return 0
+  # Prove a routable real MCS address with GMS's UID, not a root-only DNS
+  # or a generic TCP/443 connection. Google can migrate MCS to alt hosts
+  # on 443 while the main mtalk DNS name is temporarily unavailable.
+  for host in mtalk.google.com alt1-mtalk.google.com alt2-mtalk.google.com alt3-mtalk.google.com; do
+    ip=$(android_resolve_gms_domain "$host" 2>/dev/null || true)
+    [ -n "$ip" ] || continue
+    if [ "$host" = mtalk.google.com ]; then
+      ports="5228 5229 5230 443"
+    else
+      ports="443 5228"
     fi
+    for port in $ports; do
+      if gms_uid_tcp_ready "$ip" "$port"; then
+        printf 'gms-uid:%s %s %s\n' "$host" "$ip" "$port"
+        return 0
+      fi
+    done
   done
   return 1
 }
 
-android_resolve_mtalk() {
-  # Root and GMS can resolve different endpoints under Box. Run the probe
-  # under the installed GMS UID, without a ping-generated APK or test file.
+android_resolve_gms_domain() {
+  host=$1
+  case "$host" in
+    mtalk.google.com|alt[0-9]-mtalk.google.com) ;;
+    *) return 1 ;;
+  esac
   uid=$(gms_uid_for_probe) || return 1
   command -v su >/dev/null 2>&1 || return 1
   out=$(run_timeout su -s /system/bin/sh "$uid" -c \
-    '/system/bin/ping -c 1 -W 1 mtalk.google.com' 2>&1 || true)
-  # Android ping can print the canonical alias mobile-gtalk.l.google.com
-  # instead of mtalk.google.com. Both are valid names for this A record.
+    "/system/bin/ping -c 1 -W 1 $host" 2>&1 || true)
+  # The PING header may display a canonical alias (mobile-gtalk...).
+  # Validate only the returned numeric IPv4, not its textual alias.
   ip=$(printf '%s\n' "$out" | awk '
     /^PING[[:space:]]+[^[:space:]]+[[:space:]]/ {
       if (match($0, /\([0-9][0-9.]*\)/)) {
         value=substr($0,RSTART+1,RLENGTH-2)
-        if (split(value, octets, ".")==4) {
+        if (split(value,octets,".")==4) {
           good=1
-          for (i=1;i<=4;i++) if (octets[i] !~ /^[0-9]+$/ || octets[i]>255) good=0
-          if (good) {print value;exit}
+          for (i=1;i<=4;i++) if(octets[i]!~/^[0-9]+$/||octets[i]>255) good=0
+          if(good) {print value; exit}
         }
       }
     }
   ')
   case "$ip" in *.*.*.*) printf '%s\n' "$ip"; return 0;; esac
   return 1
+}
+
+android_resolve_mtalk() {
+  android_resolve_gms_domain mtalk.google.com
 }
 
 recent_gms_unknown_host_epoch() {
