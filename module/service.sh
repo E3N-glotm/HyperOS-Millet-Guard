@@ -48,19 +48,44 @@ echo $! > "$RUNDIR/inotifyd.pid"
   done
 ) >/dev/null 2>&1 &
 echo $! > "$RUNDIR/safety.pid"
-# FCM health is deliberately independent of reconcile.sh. A SettingsProvider
-# failure or reconciliation lock must not disable push recovery again. This is
-# only a fallback: deep suspend can defer shell sleeps, so the event worker
-# below also piggybacks on GMS's own AlarmManager wakeups.
+# The old two-minute sleep was NOT a wakeup alarm. During Deep Doze the
+# shell could go unexecuted for hours and even an otherwise sound recovery
+# state machine could not run. A CLOCK_BOOTTIME_ALARM timerfd wakes the kernel
+# without spinning, holding a permanent wakelock, touching alarm settings or
+# relying on system_server's delayed alarms. Unsupported devices fall back
+# to the original 120-second shell delay.
 (
+  wake_helper="$MODDIR/bin/fcm_wake_wait"
+  wake_supported=0
+  if [ "$(getprop ro.product.cpu.abi)" = arm64-v8a ] &&
+      [ -x "$wake_helper" ] &&
+      "$wake_helper" --probe >/dev/null 2>&1; then
+    wake_supported=1
+  fi
+  # Reconcile once at boot; the event worker continues to observe native GMS
+  # alarm events independently for quicker opportunistic checks.
+  if grep -Fxq 'com.google.android.gms' "$RUNDIR/packages.list" 2>/dev/null; then
+    /system/bin/sh "$MODDIR/bin/fcm_guard.sh" startup
+  fi
   while true; do
-    sleep 120
+    delay=600
+    # During a confirmed outage check at least every three minutes rather
+    # than waiting for a deferred 30-minute GMS reconnect alarm.
+    [ ! -f "$RUNDIR/fcm_down_since.epoch" ] || delay=180
+    if [ "$wake_supported" = 1 ]; then
+      if ! "$wake_helper" "$delay" >/dev/null 2>&1; then
+        wake_supported=0
+        sleep 120
+      fi
+    else
+      sleep 120
+    fi
     grep -Fxq 'com.google.android.gms' "$RUNDIR/packages.list" 2>/dev/null || continue
-    /system/bin/sh "$MODDIR/bin/fcm_guard.sh" poll
+    /system/bin/sh "$MODDIR/bin/fcm_guard.sh" alarm-watchdog
   done
 ) >/dev/null 2>&1 &
 echo $! > "$RUNDIR/fcm.pid"
-# No new timer/wakelock: observe existing GMS alarm deliveries and check FCM
+# Observe existing GMS alarm deliveries as a second, event-driven path.
 # when HyperOS has already woken the push stack.
 /system/bin/sh "$MODDIR/bin/fcm_event_worker.sh" >/dev/null 2>&1 &
 echo $! > "$RUNDIR/fcm_event.pid"
