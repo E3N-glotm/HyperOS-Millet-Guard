@@ -615,7 +615,10 @@ if [ "$outage" -ge 60 ] 2>/dev/null; then
       flush_android_dns "$now"
       rate_limited_dns_log "$now" "GMS reported UNKNOWN_HOST ${unknown_age}s ago; DNS remediation only, no GMS restart"
       soft_reconnect_if_stalled "$now" "$outage" dns-failed || true
-      exit 0
+      # After fifteen minutes, do not let a stale UNKNOWN_HOST permanently
+      # prevent escalation. A GMS-owned alternative MCS path must still be
+      # proved before any process intervention.
+      [ "$outage" -ge 900 ] 2>/dev/null || exit 0
     fi
   fi
 
@@ -625,12 +628,14 @@ if [ "$outage" -ge 60 ] 2>/dev/null; then
     flush_android_dns "$now"
     rate_limited_dns_log "$now" "Android resolver cannot resolve mtalk.google.com; DNS remediation only, no GMS restart"
     soft_reconnect_if_stalled "$now" "$outage" dns-failed || true
-    exit 0
+    [ "$outage" -ge 900 ] 2>/dev/null || exit 0
   fi
 
   last_dns_fail=$(cat "$DNSFAIL_FILE" 2>/dev/null)
   case "$last_dns_fail" in ''|*[!0-9]*) last_dns_fail=0;; esac
-  if [ "$last_dns_fail" -gt 0 ] 2>/dev/null && [ $((now-last_dns_fail)) -lt 300 ] 2>/dev/null; then
+  if [ "$last_dns_fail" -gt 0 ] 2>/dev/null &&
+      [ $((now-last_dns_fail)) -lt 300 ] 2>/dev/null &&
+      [ "$outage" -lt 900 ] 2>/dev/null; then
     rate_limited_dns_log "$now" "Android resolver recovered mtalk=$android_ip but is inside 300s stability grace; no GMS restart"
     exit 0
   fi
@@ -640,6 +645,14 @@ fi
 # that scheduler state before considering a process restart. The live incident
 # on 2026-09-05 recovered in seconds from this broadcast with the same GMS PID.
 if soft_reconnect_if_stalled "$now" "$outage"; then
+  exit 0
+fi
+
+# Never terminate Google Play services within two minutes of a fresh
+# soft GCM_RECONNECT. The native stack gets first opportunity to repair.
+soft_sent=$(cat "$SOFT_RECONNECT_FILE" 2>/dev/null)
+case "$soft_sent" in ''|*[!0-9]*) soft_sent=0;; esac
+if [ "$soft_sent" -gt 0 ] && [ $((now-soft_sent)) -lt 120 ]; then
   exit 0
 fi
 
@@ -680,21 +693,23 @@ rest=${path#* }
 ip=${rest%% *}
 port=${rest##* }
 android_ip=$(android_resolve_mtalk 2>/dev/null || true)
-[ -n "$android_ip" ] || exit 0
-log_msg "FCM guard: outage=${outage}s fcm_path=ok resolver=$resolver endpoint=$ip:$port android_resolver=$android_ip; restarting GMS-host pid=$gpid attempt=$((attempts+1))"
+# A proved alternate MCS socket is enough to attempt bounded recovery even
+# when the primary mtalk alias is broken. No unverified root-only route.
+[ -n "$android_ip" ] || android_ip=primary-unavailable
+log_msg "FCM guard: outage=${outage}s GMS-owned path verified $resolver endpoint=$ip:$port primary_dns=$android_ip; restarting GMS-host pid=$gpid attempt=$((attempts+1))"
 echo "$now" > "$LAST_FILE"
 echo $((attempts+1)) > "$ATTEMPT_FILE"
 kill -TERM "$gpid" 2>/dev/null || exit 0
 sleep 20
 
 state2=$(fcm_state)
-if [ "$state2" = "connected" ]; then
+endpoint=$(run_timeout dumpsys activity service com.google.android.gms/.gcm.GcmService 2>/dev/null \
+  | grep -m1 'connected=' | sed 's/^[[:space:]]*//' || true)
+if [ "$state2" = connected ] && fcm_mcs_socket_ready "$endpoint"; then
   rm -f "$DOWN_FILE" "$ATTEMPT_FILE" "$PATHLOG_FILE" "$DNSLOG_FILE" "$DNSFAIL_FILE" "$SOFT_RECONNECT_FILE" 2>/dev/null || true
   newpid=$(pidof com.google.android.gms.persistent 2>/dev/null | awk '{print $1}')
   [ -n "$newpid" ] || newpid=$(pidof com.google.android.gms 2>/dev/null | awk '{print $1}')
-  endpoint=$(run_timeout dumpsys activity service com.google.android.gms/.gcm.GcmService 2>/dev/null \
-    | grep -m1 'connected=' | sed 's/^[[:space:]]*//' || true)
-  log_msg "FCM guard: recovered newpid=${newpid:-unknown} ${endpoint:-endpoint-unavailable}"
+  log_msg "FCM guard: recovered and MCS socket verified newpid=${newpid:-unknown} $endpoint"
 else
-  log_msg "FCM guard: restart issued but GcmService state=$state2; retry schedule retained"
+  log_msg "FCM guard: restart issued but MCS socket unverified state=$state2; retry schedule retained"
 fi
