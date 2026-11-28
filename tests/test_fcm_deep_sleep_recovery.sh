@@ -56,13 +56,13 @@ if fcm_mcs_socket_ready 'connected=alt2-mtalk.google.com/172.217.78.188,port=444
 fi
 
 NETWORK_RESULT='Active default network: 299
-NetworkAgentInfo{network{299} Transports: WIFI Capabilities: INTERNET&TRUSTED&VALIDATED}'
+NetworkAgentInfo{network{299} Score(EVER_VALIDATED) nc{[ Transports: WIFI Capabilities: INTERNET&TRUSTED&VALIDATED LinkUpBandwidth>=200Kbps]}'
 fcm_default_net_validated || FAIL "valid network not recognized"
 NETWORK_RESULT='Active default network: 299
-NetworkAgentInfo{network{299} Transports: WIFI Capabilities: INTERNET&TRUSTED}'
+NetworkAgentInfo{network{299} Score(EVER_VALIDATED) nc{[ Transports: WIFI Capabilities: INTERNET&TRUSTED LinkUpBandwidth>=200Kbps]}'
 if fcm_default_net_validated; then FAIL "unvalidated network allowed"; fi
 NETWORK_RESULT='Active default network: 299
-NetworkAgentInfo{network{300} Transports: WIFI Capabilities: INTERNET&TRUSTED&VALIDATED}'
+NetworkAgentInfo{network{300} Score(IS_VALIDATED) nc{[ Transports: WIFI Capabilities: INTERNET&TRUSTED&VALIDATED LinkUpBandwidth>=200Kbps]}'
 if fcm_default_net_validated; then FAIL "wrong NetId allowed"; fi
 
 grep -Fq '[ "$outage" -ge 900 ]' "$GUARD" || FAIL "DNS escape budget missing"
