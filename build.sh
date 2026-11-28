@@ -25,8 +25,8 @@ chmod 0755 "$STAGE/bin/fcm_wake_wait"
 # A Windows checkout may expose CRLF even though the Git object is normalized
 # to LF. Android /system/bin/sh rejects CRLF scripts, so make the release ZIP
 # deterministic and safe regardless of the host checkout policy. The Magisk
-# module currently contains text files only.
-find "$STAGE" -type f -exec sed -i 's/\r$//' {} +
+# compiled ELF is excluded from any text normalization.
+find "$STAGE" -type f ! -name fcm_wake_wait -exec sed -i 's/\r$//' {} +
 (
   cd "$STAGE"
   zip -qr "$ZIP" . -x '*.DS_Store'
